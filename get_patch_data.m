@@ -68,11 +68,12 @@ function [t_p, t_t, r_p] = get_patch_data(filename, plot_data)
     % Otherwise, drop last travel time.
     if rem(size(t_switch, 1), 2) == 1
         end_in_patch = true;
-        t_switch = t_switch(1:length(t_switch-1));
+        t_switch = t_switch(1:length(t_switch)-1);
     else
         end_in_patch = false;
     end
-
+    
+    % patch residence time = t_exit - t_enter
     t_p = reshape(t_switch, 2, [])';
     t_p = t_p(:, 2) - t_p(:, 1);
 
