@@ -60,3 +60,20 @@ xlabel('Training Day');
 ylabel('Reward (uL)');
 xlim([0 length(r_p)+1]);
 saveas(fig, [base_name, 'r_p.png']);
+
+%% Object-based (above needs conversion)
+% Plot distribution of stopping points
+pe = PatchExperiment(filename);
+d_next_patch = pe.stopping_distances();
+figure(4);
+edges_interpatch = [-pe.d_interpatch/2:5:0, pe.d_patch:5:pe.d_interpatch/2];
+edges_patch = 0:5:pe.d_patch;
+figure(1);
+histogram(d_next_patch(d_next_patch<0 | d_next_patch>pe.d_patch), ...
+          edges_interpatch);
+hold on;
+histogram(d_next_patch(d_next_patch>=0 & d_next_patch<=pe.d_patch), ...
+          edges_patch); 
+[f, xi] = ksdensity(d_next_patch);
+plot(xi, f*1/max(f));
+hold off;
