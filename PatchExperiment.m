@@ -15,21 +15,22 @@ classdef PatchExperiment < handle
     end
     
     methods
-        % Constructor
         function obj = PatchExperiment(filename)
+            % Constructor
+             
             % Set filename
             obj.filename = filename;
             
-            % Get total time in ms from sound (known sampling rate)
-            struct = obj.load_var('UntitledSound[1-4]', true);
-            s = struct.Data;
-            dt_s = struct.Property.wf_increment;
-            obj.dt = 1e-3; % desired unit time
-            obj.t_total = int32(length(s) * dt_s / obj.dt); % total time in ms
-            
             % Determine if animal position recorded
-            struct = obj.load_var('UntitledAngularPosition', false);
-            obj.use_sound = ~exist('UntitledAngularPosition', 'var');
+            try
+                struct = obj.load_var('UntitledAngularPosition', false);
+                obj.use_sound = false;
+            catch
+                msg = ['Angular Position not found. Will use sound waveform ', ...
+                       'to estimate patch locations in time.'];
+                disp(msg);
+                obj.use_sound = true;
+            end
             
             % Get patch and interpatch distances
             try
@@ -42,6 +43,14 @@ classdef PatchExperiment < handle
                 obj.d_patch = 15;
                 obj.d_interpatch = 60;
             end
+            
+            % Get total time in ms from sound (known sampling rate)
+            struct = obj.load_var('UntitledSound[1-4]', true);
+            s = struct.Data;
+            dt_s = struct.Property.wf_increment;
+            obj.dt = 1e-3; % desired unit time
+            obj.t_total = int32(length(s) * dt_s / obj.dt); % total time in ms
+            
         end
         
         function [t_switch, in_patch] = get_patch_times_from_sound(obj)
@@ -49,20 +58,9 @@ classdef PatchExperiment < handle
             % method can be highly inaccurate. Position data preferred.
             
             % Convert sound waveform to patch distances
-            % Raw audio waveform
-            struct = obj.load_var('UntitledSound[1-4]', true);
-            s = struct.Data;
-
-            % P = rms(s) (averaged over bins of length t)
-            bin_len = 1000; % bin length
-            s_ = s(1:numel(s)-rem(numel(s), bin_len));
-            P = (sum(reshape(s_, bin_len, []).^2, 1) ./ bin_len).^0.5; % reshape is column-first operation
-            P = interp1(1:length(P), P, linspace(1, length(P), obj.t_total));
-            %sample_ratio = fix(t_total / length(P));
-            %P = interp(P, sample_ratio); % interpolate to ms
-            P = P(:); % vectorize P
-            filter_len = 500; % length (ms) of moving average filter
-            P = filter(1/filter_len * ones(filter_len, 1), 1, P); % smooth P
+            bin_len = 1000;
+            filter_len = 500;
+            P = obj.sound_power(bin_len, filter_len);
 
             % Define patch and inter-patch time stamps
             thresh = 0.008;
@@ -131,9 +129,9 @@ classdef PatchExperiment < handle
             % Get time information about patches from position
             
             % Convert angular position to linear position
-            x_t = obj.linear_position();
-            
-            
+            filter_len = 1000;
+            x_t = obj.linear_position(filter_len);
+            patches = obj.get_patch_boundaries();
             
             % Animal in a patch when position within any of boundaries
             in_patch = (x_t >= patches(1, :) & x_t <= patches(2, :));
@@ -150,12 +148,6 @@ classdef PatchExperiment < handle
             %fig.FaceColor = 'blue';
             %fig.EdgeColor = 'none';
             %hold off;
-            figure(2);
-            plot(x_t);
-            hold on;
-            scatter(find(in_patch), in_patch(in_patch>0) .* x_t(in_patch>0));
-            scatter(t_switch, ones(length(t_switch), 1) .* x_t(t_switch));
-            hold off;
             
         end
         
@@ -247,26 +239,33 @@ classdef PatchExperiment < handle
             % Figure 4: total reward vs. patch number
             figure(4);
             plot(obj.r_p);
+            
+            % Need to make x_t an object property
+            figure(5);
+            plot(x_t);
+            hold on;
+            scatter(find(in_patch), in_patch(in_patch>0) .* x_t(in_patch>0));
+            scatter(t_switch, ones(length(t_switch), 1) .* x_t(t_switch));
+            hold off;
         end
         
-        function t_stop = get_stop_times(obj)
+        function t_stop = get_stop_times(obj, stop_thresh, run_thresh)
             % Determine when animal stopped running during experiment
+            % Args:
+            % - stop_thresh: if > speed, animal considered to switch from
+            %                running to stopped (unit: cm/s)
+            % - run_thresh: if < speed, animal considered to switch from
+            %               stopped to running (unit: cm/s)
             
-            % Load wheel speed
-            struct = load(obj.filename, 'UntitledWheelSpeed');
-            wheel_speed = struct.UntitledWheelSpeed.Data * 100; % cm/s
-
-            % Interpolate and smooth wheel speed
-            filter_len = 1000; % length (ms) of moving average filter
-            wheel_speed = filter(1/filter_len * ones(filter_len, 1), 1, wheel_speed);
-            wheel_speed = interp1(1:length(wheel_speed), wheel_speed, linspace(1, length(wheel_speed), obj.t_total));
+            
+            % Get smoothed wheel speed
+            filter_len = 1000;
+            wheel_speed = obj.wheel_speed(filter_len);
             
             % Mark stopping point as first occurrence of wheel_speed <
             % stop_thresh after wheel_speed > run_thresh. This avoid
             % counting noisy oscillations around the threshold as multiple
             % stopping points.
-            run_thresh = 2.0; % cm/s
-            stop_thresh = 1.0; % cm/s
             is_running = wheel_speed(1) > run_thresh; % initially running
             t_stop = zeros(obj.t_total, 1);
             for i = 1:obj.t_total
@@ -281,10 +280,11 @@ classdef PatchExperiment < handle
             
         end
         
-        function d_next_patch = stopping_distances(obj)
+        function d_next_patch = stopping_distances(obj, stop_thresh, run_thresh)
             % stopping times
-            t_stop = obj.get_stop_times();
-            x_t = obj.linear_position();
+            filter_len = 1000;
+            t_stop = obj.get_stop_times(stop_thresh, run_thresh);
+            x_t = obj.linear_position(filter_len);
             x_stop = x_t(t_stop);
             patches = obj.get_patch_boundaries();
 
@@ -304,11 +304,28 @@ classdef PatchExperiment < handle
             d_next_patch = d_next_patch + obj.d_patch; % shift 0 to start of patch
            
         end
-
-        function x_t = linear_position(obj)
-            % Convert angular position to linear position
+        
+        function patch_bounds = get_patch_boundaries(obj)
+            % Create array of patch boundaries
             
-            filter_len = 1000; % length (ms) of moving average filter
+            filter_len = 1000;
+            x_t = obj.linear_position(filter_len);
+            d1 = obj.d_interpatch; d2 = obj.d_patch; % for aesthetics
+            max_num_patches = ceil(max(x_t) / (d1+d2));
+            patch_bounds = zeros(2, max_num_patches);
+            patch_bounds(1, :) = (d1:(d1+d2):max_num_patches*(d1+d2));
+            patch_bounds(2, :) = ((d1+d2):(d1+d2):max_num_patches*(d1+d2)+d2);
+            
+        end
+       
+        % Intermediate values (these may need to be switched to object 
+        % properties if loading multiple times is slow; currently this way
+        % to preserve memory)
+        function x_t = linear_position(obj, filter_len)
+            % Convert angular position to linear position
+            % Args:
+            % - filter_len: length (ms) of moving average filter
+            
             struct = obj.load_var('UntitledAngularPosition', false);
             theta_t = struct.Data;
             theta_t = filter(1/filter_len * ones(filter_len, 1), 1, theta_t); % smooth theta
@@ -318,18 +335,43 @@ classdef PatchExperiment < handle
             
         end
         
-        function patch_bounds = get_patch_boundaries(obj)
-            % Create array of patch boundaries
+        function P = sound_power(obj, window_len, filter_len)
+            % Convert sound waveform to smoothed power curve
+            % Args:
+            % - bin_len: length (ms) of bins for computing power
+            % - filter_len: length (ms) of moving average filter
             
-            x_t = obj.linear_position();
-            d1 = obj.d_interpatch; d2 = obj.d_patch; % for aesthetics
-            max_num_patches = ceil(max(x_t) / (d1+d2));
-            patch_bounds = zeros(2, max_num_patches);
-            patch_bounds(1, :) = (d1:(d1+d2):max_num_patches*(d1+d2));
-            patch_bounds(2, :) = ((d1+d2):(d1+d2):max_num_patches*(d1+d2)+d2);
+            % Raw audio waveform
+            struct = obj.load_var('UntitledSound[1-4]', true);
+            s = struct.Data;
+
+            % P = rms(s) (averaged over bins of length t)
+            %s_ = s(1:numel(s)-rem(numel(s), bin_len));
+            %P = (sum(reshape(s_, bin_len, []).^2, 1) ./ bin_len).^0.5; % reshape is column-first operation
+            kernel = ones(1, window_len) / window_len; % sliding filter to sum squares
+            P = filter(kernel, 1, s.^2); % avg of sum of squares in window
+            P = P .^ 0.5; % rms
+            P = interp1(1:length(P), P, linspace(1, length(P), obj.t_total));
+            P = P(:); % vectorize P
+            P = filter(1/filter_len * ones(filter_len, 1), 1, P); % smooth P
             
         end
-       
+        
+        function wheel_speed = wheel_speed(obj, filter_len)
+            % Return smoothed wheel speed over time
+            % Args:
+            % - filter_len: length (ms) of moving average filter
+            
+            % Load wheel speed
+            struct = load(obj.filename, 'UntitledWheelSpeed');
+            wheel_speed = struct.UntitledWheelSpeed.Data * 100; % cm/s
+
+            % Interpolate and smooth wheel speed
+            wheel_speed = filter(1/filter_len * ones(filter_len, 1), 1, wheel_speed);
+            wheel_speed = interp1(1:length(wheel_speed), wheel_speed, linspace(1, length(wheel_speed), obj.t_total));
+        end
+        
+        % Helper functions
         function struct = load_var(obj, var_name, use_regex)
              % Load data files
              
@@ -342,6 +384,11 @@ classdef PatchExperiment < handle
             fieldname = fieldname{1}; % 'var_name'
             struct = getfield(struct, fieldname); % var_name
             
-        end 
+        end
+        
+        function clear_memory(obj)
+            % Can set this function to clear either all large memory
+            % object properties or specific list 
+        end
     end
 end
