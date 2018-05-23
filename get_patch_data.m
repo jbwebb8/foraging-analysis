@@ -25,9 +25,12 @@ function [t_p, t_t, r_p] = get_patch_data(filename, plot_data)
     bin_len = 1000; % bin length
     s_ = s(1:numel(s)-rem(numel(s), bin_len));
     P = (sum(reshape(s_, bin_len, []).^2, 1) ./ bin_len).^0.5; % reshape is column-first operation
+    P = interp1(1:length(P), P, linspace(1, length(P), t_total));
+    %sample_ratio = fix(t_total / length(P));
+    %P = interp(P, sample_ratio); % interpolate to ms
     P = P(:); % vectorize P
-    sample_ratio = fix(t_total / length(P));
-    P = interp(P, sample_ratio);
+    filter_len = 500; % length (ms) of moving average filter
+    P = filter(1/filter_len * ones(filter_len, 1), 1, P); % smooth P
 
     % Define patch and inter-patch time stamps
     thresh = 0.008;
@@ -41,27 +44,39 @@ function [t_p, t_t, r_p] = get_patch_data(filename, plot_data)
     d_interpatch = 60; % cm
     t_t_min = (d_interpatch / v_max) / dt; % ms
 
+    % Find timestamps associated with patch entry/exit
+    % 1) Over/under threshold crossing --> patch entry/exit
     t_switch = find((in_patch + circshift(in_patch, -1)) == 1);
-    t_current = t_switch(1);
-    num_switches = 1;
-    in_patch_t = false;
-    true_switch = zeros(length(t_switch), 1);
+
+    % 2) Ensure that patch/interpatch times are feasible
+    t_current = t_switch(1); % current length of patch/interpatch in ms
+    num_switches = 1; % number of threshold crossings since last entry/exit
+    in_patch_t = false; % currently in patch
+    true_switch = zeros(length(t_switch), 1); % feasible thresh crossings 
     for i = 1:length(t_switch)
+        % Add duration of next switch
         if i > 1
             t_current = t_current + (t_switch(i) - t_switch(i-1));
             num_switches = num_switches + 1;
         end
+
+        % Get minimum feasible time between switches
         if in_patch_t
             t_min = t_p_min;
         else
             t_min = t_t_min;
         end
+
+        % Switch corresponds to actual entry/exit if time is feasible
+        % and number of thresh crossings is even
         if (t_current >= t_min) && (rem(num_switches, 2) == 1)
             true_switch(i) = 1;
             t_current = 0;
             num_switches = 0;
-        end   
+        end  
     end
+    
+    % Update t_switch to checked version
     t_switch = t_switch(logical(true_switch));
 
     % If end in middle of patch, drop last patch. 
