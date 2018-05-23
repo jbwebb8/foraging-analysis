@@ -48,33 +48,65 @@ save(new_filename, 't_p', 't_t', 'r_p', 'd_next_patch', 'filelist');
 if ~(exist('t_p', 'var') && exist('t_t', 'var') && exist('r_p', 'var'))
     load(new_filename);
 end
+save_fig = false;
 
 % Plot patch residence times
-figure(1);
-fig = errorbar(t_p(:, 1) / 1000, t_p(:, 2) / 1000);
+fig1 = figure(1);
+clf(fig1);
+hold on;
+for i = 1:length(t_p)
+    c1 = [0.122 0.467 0.706]; % pyplot C0 = blue
+    c2 = [0.0 0.0 0.0]; % black data points
+    bar(i, mean(t_p{i})/1000, 'FaceColor', c1); % mean
+    errorbar(i, mean(t_p{i})/1000, 0.0, std(t_p{i})/1000, 'Color', c1); % pos std error
+    scatter(i*ones(length(t_p{i}), 1), t_p{i}/1000, 20, c2, 'filled'); % data points
+end
+hold off;
 title('Patch Residence Time');
 xlabel('Training Day');
 ylabel('Time (s)');
 xlim([0 length(t_p)+1]);
-saveas(fig, [base_name, 't_p.png']);
 
 % Plot travel times
-figure(2);
-fig = errorbar(t_t(:, 1) / 1000, t_t(:, 2) / 1000);
+fig2 = figure(2);
+clf(fig2);
+hold on;
+for i = 1:length(t_t)
+    c1 = [0.122 0.467 0.706]; % pyplot C0 = blue
+    c2 = [0.0 0.0 0.0]; % black data points
+    bar(i, mean(t_t{i})/1000, 'FaceColor', c1); % mean
+    errorbar(i, mean(t_t{i})/1000, 0.0, std(t_t{i})/1000, 'Color', c1); % pos std error
+    scatter(i*ones(length(t_t{i}), 1), t_t{i}/1000, 20, c2, 'filled'); % data points
+end
+hold off;
 title('Travel Time Between Patches');
 xlabel('Training Day');
 ylabel('Time (s)');
 xlim([0 length(t_t)+1]);
-saveas(fig, [base_name, 't_t.png']);
 
 % Plot average patch rewards
-figure(3);
-fig = errorbar(r_p(:, 1), r_p(:, 2));
+fig3 = figure(3);
+clf(fig3);
+hold on;
+for i = 1:length(r_p)
+    c1 = [0.122 0.467 0.706]; % pyplot C0 = blue
+    c2 = [0.0 0.0 0.0]; % black data points
+    bar(i, mean(r_p{i}), 'FaceColor', c1); % mean
+    errorbar(i, mean(r_p{i}), 0.0, std(r_p{i}), 'Color', c1); % pos std error
+    scatter(i*ones(length(r_p{i}), 1), r_p{i}, 20, c2, 'filled'); % data points
+end
+hold off;
 title('Average Cumulative Reward per Patch');
 xlabel('Training Day');
 ylabel('Reward (uL)');
 xlim([0 length(r_p)+1]);
-saveas(fig, [base_name, 'r_p.png']);
+
+% Save figures if specified
+if save_fig
+    saveas(fig1, [base_name, 't_p']);
+    saveas(fig2, [base_name, 't_t']);
+    saveas(fig3, [base_name, 'r_p']);
+end
 
 %% Plot distribution of stopping points
 % histogram plots
@@ -124,4 +156,4 @@ xlabel('Distance (cm)');
 ylabel('Day');
 xlim([-max(d_config(:, 2)/2)*1.1 max(d_config(:, 1)+d_config(:, 2)/2)*1.1]);
 ylim([0 length(d_next_patch)+1]);
-saveas(fig, [base_name, 'd_stop.png']);
+saveas(fig, [base_name, 'd_stop']);
