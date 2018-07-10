@@ -44,13 +44,23 @@ classdef PatchExperiment < handle
                 obj.d_interpatch = 60;
             end
             
+            % Get total time in ms from wheel sampling (much cheaper than
+            % loading sound)
+            struct = obj.load_var('UntitledWheelTime', false);
+            t_total = struct.Data(end); % last sample time in sec
+            obj.dt = 1e-3; % desired unit time
+            obj.t_total = t_total / obj.dt; % total time in ms
+            
+        end
+        
+        function set_t_total_from_sound(obj)
+        
             % Get total time in ms from sound (known sampling rate)
             struct = obj.load_var('UntitledSound[1-4]', true);
             s = struct.Data;
             dt_s = struct.Property.wf_increment;
-            obj.dt = 1e-3; % desired unit time
             obj.t_total = int32(length(s) * dt_s / obj.dt); % total time in ms
-            
+        
         end
         
         function [t_switch, in_patch] = get_patch_times_from_sound(obj)
