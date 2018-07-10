@@ -1,4 +1,4 @@
-%% Extract patch data
+%% Set parameters and create filelist
 % Arguments:
 % - filelist: txt file containing file names of all training days of one 
 %   mouse, in numerical order
@@ -8,7 +8,7 @@ filelist = importdata('j1z4/matlist.txt');
 plot_data = false;
 use_sound = false;
 stop_thresh = 0.1;
-run_thresh = 2.0;
+run_thresh = 0.5;
 
 % Sort filelist and remove irrelevant filenames
 training_days = zeros(length(filelist), 1);
@@ -26,6 +26,7 @@ end
 filelist = filelist(sorted_idx);
 training_days = sorted_days;
 
+%% Extract patch data
 % Set data placeholders for each experiment
 t_p = cell(size(filelist, 1), 1); % residence time
 t_t = cell(size(filelist, 1), 1); % travel time
@@ -202,4 +203,21 @@ if save_fig
     saveas(fig2, [base_name, 't_t']);
     saveas(fig3, [base_name, 'r_p']);
     saveas(fig6, [base_name, 'd_stop']);
+end
+
+%% Extract basic learning metrics (d`, bias, lick rate)
+d_prime = zeros(length(filelist), 1);
+bias = zeros(length(filelist), 1);
+lick_rate = zeros(length(filelist), 1);
+
+for i = 1:size(filelist)
+    % Get filename
+    filename = filelist{i};
+    fprintf('Processing file %s\n', filename);
+    pe = PatchExperiment(filename);
+    
+    % Get metrics
+    struct = pe.load_var('UntitledS_dPrime', false);
+    d_prime(i) = struct.Data;
+    
 end
