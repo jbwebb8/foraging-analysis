@@ -4,27 +4,14 @@
 %   mouse, in numerical order
 % - plot_data: plot file data (e.g. power vs. time) while processing
 % - use_sound: use sound waveform for defining patches if position not available
-filelist = importdata('j1z4/matlist.txt');
+filelist = 'matlist_names.txt';
 plot_data = false;
 use_sound = false;
 stop_thresh = 0.1;
 run_thresh = 2.0;
 
 % Sort filelist and remove irrelevant filenames
-training_days = zeros(length(filelist), 1);
-for i = 1:length(filelist)
-    filename = filelist{i};
-    [start_idx, end_idx] = regexp(filename, '_d[0-9]+_');
-    training_days(i) = str2double(filename(start_idx+2:end_idx-1));
-end 
-[sorted_days, sorted_idx] = sort(training_days);
-nan_idx = find(isnan(sorted_days));
-if ~isempty(nan_idx)
-    sorted_days = sorted_days(1:nan_idx-1);
-    sorted_idx = sorted_idx(1:nan_idx-1);
-end
-filelist = filelist(sorted_idx);
-training_days = sorted_days;
+[filelist, training_days] = sort_training_files(filelist);
 
 % Set data placeholders for each experiment
 t_p = cell(size(filelist, 1), 1); % residence time
