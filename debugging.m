@@ -1,6 +1,6 @@
 %% Mostly a compilation of scripts for debugging experiments in more detail
 % Load experiment
-filename = 'j1z4_d17_2018_05_07_10_09_05.mat';
+filename = 'j1z3_d25_2018_05_18_10_25_04.mat';
 pe = PatchExperiment(filename);
 
 %% Debug patch activity: plot wheel speed, position, stop points, and sound power
@@ -28,4 +28,32 @@ fig.FaceAlpha = 0.2;
 fig.FaceColor = 'blue';
 fig.EdgeColor = 'none';
 ylim([0 max(x_t)*1.1])
+hold off;
+
+%% Variant of debugging plot above
+figure(1);
+clf;
+hold on;
+yyaxis left;
+patch_bounds = pe.get_patch_boundaries();
+for i = 1:length(patch_bounds)
+    x = 0;
+    y = patch_bounds(1, i);
+    w = length(x_t);
+    h = pe.d_patch;
+    rect = rectangle('Position', [x, y, w, h]);
+    rect.FaceColor = [0.75 0.75 0.75];
+    rect.EdgeColor = 'none';
+end
+plot(x_t);
+scatter(t_stop, x_t(t_stop));
+ylim([0 max(x_t)*1.1])
+ylabel('linear position (cm)');
+
+yyaxis right;
+plot(wheel_speed, 'Linestyle', ':');
+ylim([0 max(wheel_speed)*3])
+ylabel('wheel speed (cm/s)');
+
+xlabel('time (ms)');
 hold off;
