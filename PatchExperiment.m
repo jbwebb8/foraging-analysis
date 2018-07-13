@@ -1,17 +1,23 @@
 classdef PatchExperiment < handle
     properties
+        
         filename % data file (.mat)
         use_sound % true if position info not available
+        
         t_total % total time of experiment in ms
         dt % incremental time step (default ms)
+        t_active % active time window [t_start, t_end]
+        
         d_patch % distance of a patch (cm)
         d_interpatch % distance between patches (cm)
         in_patch % true if in patch at time t (vector of length t_total)
         end_in_patch % true if experiment stopped in middle of patch
         num_patches % number of patches animal encountered (last patch dropped if end_in_patch true)
+        
         t_p % 2D array of patch start and end times
         t_t % 2D array of travel start and end times
         r_p % vector of total reward received in each patch
+        
     end
     
     methods
@@ -32,16 +38,22 @@ classdef PatchExperiment < handle
                 obj.use_sound = true;
             end
             
-            % Get patch and interpatch distances
+            % Get patch and interpatch distances. Two different naming conventions.
             try
                 struct = obj.load_var('SoundConfiguration', false);
                 obj.d_patch = str2double(struct.Property.RunConfigPatchLengthcm);
                 obj.d_interpatch = str2double(struct.Property.RunConfigInterPatchDistcm);
             catch
-                msg = 'Patch and interpatch distances not found. Using default values.';
-                disp(msg);
-                obj.d_patch = 15;
-                obj.d_interpatch = 60;
+                try
+                    struct = obj.load_var('Settings', false);
+                    obj.d_patch = str2double(struct.Property.SoundConfigurationRunConfigPatchLengthcm);
+                    obj.d_interpatch = str2double(struct.Property.SoundConfigurationRunConfigInterPatchDistcm);
+                catch
+                    msg = 'Patch and interpatch distances not found. Using default values.';
+                    disp(msg);
+                    obj.d_patch = 15;
+                    obj.d_interpatch = 60;
+                end
             end
             
             % Get total time in ms from wheel sampling (much cheaper than
@@ -49,7 +61,7 @@ classdef PatchExperiment < handle
             struct = obj.load_var('UntitledWheelTime', false);
             t_total = struct.Data(end); % last sample time in sec
             obj.dt = 1e-3; % desired unit time
-            obj.t_total = t_total / obj.dt; % total time in ms
+            obj.t_total = int32(t_total / obj.dt); % total time in ms
             
         end
         
@@ -163,8 +175,8 @@ classdef PatchExperiment < handle
         
         function [t_p, t_t, in_patch] = get_patch_times(obj)
             % Get time information about patches from sound waveform
-            % - t_p: [num_patches, 2] array representing patch start and end points
-            % - t_t: [num_patches, 2] array representing interpatch start and end points
+            % - t_p: [num_patches, 1] array representing patch residence times
+            % - t_t: [num_patches, 1] array representing interpatch start and end points
             % - in_patch: [t_total, 1] vector representing whether or not in patch
             if obj.use_sound
                 [t_switch, in_patch] = get_patch_times_from_sound(obj);
@@ -327,7 +339,25 @@ classdef PatchExperiment < handle
             patch_bounds(2, :) = ((d1+d2):(d1+d2):max_num_patches*(d1+d2)+d2);
             
         end
-       
+        
+        % Window functions: These return values that are dependent on the
+        % active time window, which is set by the helper function
+        % set_time_window() below.
+        % Note: these will have to wait until a link can be made between
+        % the trial and the time.
+        function d_prime(obj)
+            % Return d` (sensitivity) for active time window.
+            
+            % Get hit rate in active time window
+            
+            % Get FA rate in active time window
+            
+            % Get z-transform of both rates
+            
+            % Return d`
+            
+        end
+        
         % Intermediate values (these may need to be switched to object 
         % properties if loading multiple times is slow; currently this way
         % to preserve memory)
@@ -381,19 +411,37 @@ classdef PatchExperiment < handle
             wheel_speed = interp1(1:length(wheel_speed), wheel_speed, linspace(1, length(wheel_speed), obj.t_total));
         end
         
-        % Helper functions
+        % Helper functions: Miscellaneous helper functions.
         function struct = load_var(obj, var_name, use_regex)
-             % Load data files
+            % Load data files
              
             if use_regex    
                 struct = load(obj.filename, '-regexp', var_name); % struct.var_name
             else
                 struct = load(obj.filename, var_name); % struct.var_name
             end
-            fieldname = fieldnames(struct); % {'var_name'}
-            fieldname = fieldname{1}; % 'var_name'
-            struct = getfield(struct, fieldname); % var_name
             
+            fieldname = fieldnames(struct); % {'var_name'}
+            if ~isempty(fieldname)
+                fieldname = fieldname{1}; % 'var_name'
+                struct = getfield(struct, fieldname); % var_name
+            else
+                msg = 'Variable %s not found.';
+                error(msg, var_name);
+            end
+            
+        end
+        
+        function set_time_window(obj, t_start, t_end)
+            % Set current time window for dependent functions.
+            % Args:
+            % - t_start: start time in minutes
+            % - t_end: end time in minutes
+            
+            t_start = t_start / obj.dt;
+            t_end = t_end / obj.dt;
+            obj.t_active = [t_start, t_end];
+        
         end
         
         function clear_memory(obj)

@@ -4,7 +4,7 @@
 %   mouse, in numerical order
 % - plot_data: plot file data (e.g. power vs. time) while processing
 % - use_sound: use sound waveform for defining patches if position not available
-filelist = 'matlist_names.txt';
+filelist = 'matlist.txt';
 plot_data = false;
 use_sound = false;
 stop_thresh = 0.1;
@@ -49,7 +49,7 @@ t_p = t_p(keep_idx);
 t_t = t_t(keep_idx);
 r_p = r_p(keep_idx);
 d_next_patch = d_next_patch(keep_idx);
-d_config = d_config(keep_idx);
+d_config = d_config(keep_idx, :);
 
 %% Save data
 [start_idx, end_idx] = regexp(filename, 'j[0-9]+[a-z][0-9]+_');
@@ -193,9 +193,13 @@ if save_fig
 end
 
 %% Extract basic learning metrics (d`, bias, lick rate)
-d_prime = zeros(length(filelist), 1);
-bias = zeros(length(filelist), 1);
-lick_rate = zeros(length(filelist), 1);
+% Set up matrices
+hit_rate = zeros(length(filelist), 2);
+fa_rate = zeros(length(filelist), 2);
+d_prime = zeros(length(filelist), 2);
+bias = zeros(length(filelist), 2);
+var_names = {'UntitledS_HitRate', 'UntitledS_FARate', 'UntitledS_dPrime', 'UntitledS_c'};
+vars = {hit_rate, fa_rate, d_prime, bias}; % must match order above!
 
 for i = 1:size(filelist)
     % Get filename
@@ -203,8 +207,50 @@ for i = 1:size(filelist)
     fprintf('Processing file %s\n', filename);
     pe = PatchExperiment(filename);
     
-    % Get metrics
-    struct = pe.load_var('UntitledS_dPrime', false);
-    d_prime(i) = struct.Data;
+    % Get metrics. Must use try-catch statements since a few files do not
+    % have variable (for some unknown reason).
+    for j = 1:length(var_names)
+        try
+            struct = pe.load_var(var_names{j}, false);
+            vars{j}(i) = [training_day(i), struct.Data];
+        catch
+            msg = 'd` not found in file %s. Skipping entry.\n';
+            disp(fprintf(msg, var_names{j}));
+            d_prime(i) = 10; % invalid value
+        end
+    end
+    
+    %{
+    try
+        struct = pe.load_var('UntitledS_dPrime', false);
+        d_prime_i = struct.Data;
+        if d_prime_i == inf
+            d_prime(i) = 6.93; % theoretical limit
+        elseif d_prime_i == inf
+            d_prime(i) = -6.93;
+        else
+            d_prime(i) = d_prime_i;
+        end
+    catch
+        msg = 'd` not found in file %s. Skipping entry.\n';
+        disp(fprintf(msg, 'UntitledS_dPrime'));
+        d_prime(i) = 10; % invalid value
+    end
+    
+    try
+        struct = pe.load_var('UntitledS_c', false);
+        c_i = struct.Data;
+        bias(i) = c_i;
+    catch
+        msg = 'bias not found in file %s. Skipping entry.\n';
+        disp(fprintf(msg, 'UntitledS_c'));
+        d_prime(i) = 10; % invalid value
+    end
+    %}
     
 end
+
+% Plot results
+
+
+%% Analyze velocity traces
