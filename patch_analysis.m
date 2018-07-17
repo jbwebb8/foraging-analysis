@@ -12,6 +12,8 @@ run_thresh = 0.5;
 
 % Sort filelist and remove irrelevant filenames
 [filelist, training_days] = sort_training_files(filelist);
+start_idx = regexp(filelist{1}, 'j[0-9][a-z][0-9]_d');
+mouse_id = filelist{1}(start_idx:start_idx+3);
 
 %% Extract patch data
 % Set data placeholders for each experiment
@@ -194,14 +196,12 @@ end
 
 %% Extract basic learning metrics (d`, bias, lick rate)
 % Set up matrices
-hit_rate = zeros(length(filelist), 2);
-fa_rate = zeros(length(filelist), 2);
-d_prime = zeros(length(filelist), 2);
-bias = zeros(length(filelist), 2);
 var_names = {'UntitledS_HitRate', 'UntitledS_FARate', 'UntitledS_dPrime', 'UntitledS_c'};
-vars = {hit_rate, fa_rate, d_prime, bias}; % must match order above!
+vars = cell(length(var_names), 1);
+vars(:) = {zeros(length(filelist), 2)}; % must match order above!
+keep_idx = zeros(length(filelist), length(var_names));
 
-for i = 1:size(filelist)
+for i = 1:length(filelist)
     % Get filename
     filename = filelist{i};
     fprintf('Processing file %s\n', filename);
@@ -212,45 +212,161 @@ for i = 1:size(filelist)
     for j = 1:length(var_names)
         try
             struct = pe.load_var(var_names{j}, false);
-            vars{j}(i) = [training_day(i), struct.Data];
-        catch
-            msg = 'd` not found in file %s. Skipping entry.\n';
-            disp(fprintf(msg, var_names{j}));
-            d_prime(i) = 10; % invalid value
+            vars{j}(i, :) = [training_days(i), struct.Data];
+            keep_idx(i, j) = 1;
+        catch ME
+            if strcmp(ME.identifier, '')
+                msg = '%s not found in file %s. Skipping entry.';
+                disp(fprintf(msg, var_names{j}, filelist{i}));
+            else 
+                rethrow(ME)
+            end
         end
     end
-    
-    %{
-    try
-        struct = pe.load_var('UntitledS_dPrime', false);
-        d_prime_i = struct.Data;
-        if d_prime_i == inf
-            d_prime(i) = 6.93; % theoretical limit
-        elseif d_prime_i == inf
-            d_prime(i) = -6.93;
-        else
-            d_prime(i) = d_prime_i;
-        end
-    catch
-        msg = 'd` not found in file %s. Skipping entry.\n';
-        disp(fprintf(msg, 'UntitledS_dPrime'));
-        d_prime(i) = 10; % invalid value
-    end
-    
-    try
-        struct = pe.load_var('UntitledS_c', false);
-        c_i = struct.Data;
-        bias(i) = c_i;
-    catch
-        msg = 'bias not found in file %s. Skipping entry.\n';
-        disp(fprintf(msg, 'UntitledS_c'));
-        d_prime(i) = 10; % invalid value
-    end
-    %}
-    
+end
+
+% Filter out missing days
+for j = 1:length(var_names)
+    vars{j} = vars{j}(find(keep_idx(:, j)), :);
 end
 
 % Plot results
+for j = 1:length(var_names)
+    fig = figure(j);
+    clf(fig);
+    plot(vars{j}(:, 1), vars{j}(:, 2));
+    %ylim([-2 2]);
+    ylabel(var_names{j});
+    xlabel('Training Day');
+end
 
+%% Analyze relationship between behavior and time
+% Does performance worsen with time and/or reward accrued? In order to
+% answer, let's plot a sliding window of the average hit rate, etc. over
+% the last n trials vs. total reward accrued.
 
+% Trial results:
+% 0 Hit
+% 1 Miss
+% 2 ?
+% 3 ? (happens only on catch trials)
+% 4 FA?
+% Hit rate is sum(results == 0) / sum((results == 0) + (results == 1))
+% Unclear how FA rate is calculated: sum(results == 4) / sum(results > 1)
+% is close but not exact. For now, we'll just use this measure.
+
+% Params
+m = 30; % length of sliding window (# trials)
+n = 4; % minimum # of trials to calculate metric
+
+% Set up matrices
+hit_rate = cell(length(filelist), 1);
+fa_rate = cell(length(filelist), 1);
+d_prime = cell(length(filelist), 1);
+c = cell(length(filelist), 1);
+r_cum = cell(length(filelist), 1);
+
+for i = 1:length(filelist)
+    % Get filename
+    filename = filelist{i};
+    fprintf('Processing file %s\n', filename);
+    pe = PatchExperiment(filename);
+    
+    % Get cumulative rewards over trials
+    struct = pe.load_var('UntitledRewarduL', false);
+    rewards = struct.Data;
+    r_cum{i} = cumsum(rewards);
+    
+    % Slide along trial outcomes with window of size m
+    struct = pe.load_var('UntitledTrialResult', false);
+    results = struct.Data;
+    num_trials = length(results);
+    hit_rate{i} = zeros(num_trials, 1);
+    fa_rate{i} = zeros(num_trials, 1);
+    d_prime{i} = zeros(num_trials, 1);
+    c{i} = zeros(num_trials, 1);
+    for j = 1:num_trials
+        % Get most recent m results
+        results_m = results(max(1, j-m+1):j);
+        
+        % Calculate fa rate = (# licks | no target) / (# no target)
+        % TODO: this is slightly off, not sure why
+        % New way: sum total time of no licking while no signal during
+        % each trial type
+        % - Hit/miss: time to target start
+        % - FA: time to FA
+        % - Catch: duration of trial
+        % Divide this total time by the duration of the target(i.e. how many
+        % time blocks), and then divide the total number of FAs by this number
+        num_ns_trials = sum(results_m > 1);
+        if num_ns_trials >= n
+            fa_rate{i}(j) = sum(results_m == 4) / num_ns_trials;
+        else
+            fa_rate{i}(j) = 0.0;
+        end
+        
+        % Double number of trials, (2m-1)/(2m)
+        % Calculate hit rate = (# licks | target) / (# target)
+        num_s_trials = sum((results_m == 0) + (results_m == 1));
+        if num_s_trials >= n
+            hit_rate{i}(j) = sum(results_m == 0) / num_s_trials;
+        else
+            hit_rate{i}(j) = fa_rate{i}(j);
+        end
+        
+        % Calculate d` and c
+        if ~(isnan(hit_rate{i}(j)) || isnan(fa_rate{i}(j)))
+            % Calculate z-scores for hit rate and fa rate. Assume they are
+            % sampled from a cumulative Gaussian distribution ~ N(0, 1).
+            mu = 0.0;
+            sigma = 1.0;
+            pd = makedist('Normal',mu,sigma);
+            hit_rate_in = max(min(hit_rate{i}(j), 0.99), 0.01); % avoids z = +/-inf
+            fa_rate_in = max(min(fa_rate{i}(j), 0.99), 0.01); % avoids z = +/-inf
+            z_hit_rate = icdf(pd, hit_rate_in) / sigma;
+            z_fa_rate = icdf(pd, fa_rate_in) / sigma;
+
+            % Calculate d` = z(hit_rate) - z(fa_rate)
+            d_prime{i}(j) = z_hit_rate - z_fa_rate;
+
+            % Calculate c = (z(hit_rate) + z(fa_rate)) / 2
+            c{i}(j) = -(z_hit_rate + z_fa_rate) / 2; % no negative sign
+        else
+            % Set values to be undefined
+            d_prime{i}(j) = NaN;
+            c{i}(j) = NaN;
+        end
+    end
+end
+
+% Plot results
+for i = 1:4
+    clf(figure(i));
+    hold on;
+end
+
+for i = 1:length(filelist)
+    figure(1);
+    plot(hit_rate{i});
+    
+    figure(2);
+    plot(fa_rate{i});
+    
+    figure(3);
+    plot(d_prime{i});
+    
+    figure(4);
+    plot(c{i});
+end
+hold off;
+
+y_labels = {'Hit Rate', 'FA Rate', 'd`', 'c'};
+for i = 1:4
+    figure(i);
+    title(mouse_id);
+    xlabel('Trial #');
+    ylabel(y_labels{i});
+    legend("Day " + string(training_days));
+end
 %% Analyze velocity traces
+v = pe.wheel_speed();
