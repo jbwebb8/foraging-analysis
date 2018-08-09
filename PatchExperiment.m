@@ -3,6 +3,8 @@ classdef PatchExperiment < handle
         
         filename % data file (.mat)
         use_sound % true if position info not available
+        fig_id % avoids overwriting figures
+        verbose % plot intermediate figures, output intermediate values, etc.
         
         t_total % total time of experiment in ms
         dt % incremental time step (default ms)
@@ -22,32 +24,23 @@ classdef PatchExperiment < handle
     
     methods
         function obj = PatchExperiment(filename)
-            % Constructor
+            % Constructor %
              
-            % Set filename
+            % Set global settings
             obj.filename = filename;
-            
-            % Determine if animal position recorded
-            try
-                struct = obj.load_var('UntitledAngularPosition', false);
-                obj.use_sound = false;
-            catch
-                msg = ['Angular Position not found. Will use sound waveform ', ...
-                       'to estimate patch locations in time.'];
-                disp(msg);
-                obj.use_sound = true;
-            end
+            obj.fig_id = 1;
+            obj.verbose = false;
             
             % Get patch and interpatch distances. Two different naming conventions.
             try
-                struct = obj.load_var('SoundConfiguration', false);
-                obj.d_patch = str2double(struct.Property.RunConfigPatchLengthcm);
-                obj.d_interpatch = str2double(struct.Property.RunConfigInterPatchDistcm);
+                struct = obj.load_var('Settings', false);
+                obj.d_patch = str2double(struct.Property.SoundConfigurationRunConfigPatchLengthcm);
+                obj.d_interpatch = str2double(struct.Property.SoundConfigurationRunConfigInterPatchDistcm);
             catch
                 try
-                    struct = obj.load_var('Settings', false);
-                    obj.d_patch = str2double(struct.Property.SoundConfigurationRunConfigPatchLengthcm);
-                    obj.d_interpatch = str2double(struct.Property.SoundConfigurationRunConfigInterPatchDistcm);
+                    struct = obj.load_var('SoundConfiguration', false);
+                    obj.d_patch = str2double(struct.Property.RunConfigPatchLengthcm);
+                    obj.d_interpatch = str2double(struct.Property.RunConfigInterPatchDistcm);
                 catch
                     msg = 'Patch and interpatch distances not found. Using default values.';
                     disp(msg);
@@ -75,76 +68,105 @@ classdef PatchExperiment < handle
         
         end
         
-        function [t_switch, in_patch] = get_patch_times_from_sound(obj)
-            % Note: due to errors in recording the sound waveform, this
-            % method can be highly inaccurate. Position data preferred.
+        function s = get_spectrogram_variance(obj, fft_pts, lp_pass, lp_stop)
+            %%% Finish incorporating code from patch_analysis to PatchExperiment %%%
+            
+            % Load sound data
+            struct = obj.load_var('UntitledSound[1-4]', true);
+            sound_wf = struct.Data;
+            dt_wf = struct.Property.wf_increment;
+
+            % Get spectrogram of sound waveform
+            s = spectrogram(sound_wf, fft_pts); % complex frequency content; shape=[freq, time]
+            s_abs = abs(s); % complex magnitude; shape=[freq, time]
+
+            % Create filter
+            d = fdesign.lowpass('Fp,Fst,Ap,Ast', ... % format
+                                2*lp_pass*dt_wf*fft_pts, ... % Fp
+                                2*lp_stop*dt_wf*fft_pts, ... % Fst
+                                1, 60); % Ap, Ast
+            %designmethods(d) % lists design choices
+            Hd = design(d, 'butter'); % Butterworth IIR filter
+            if obj.verbose
+                fvtool(Hd); % visualize filter
+            end
+
+            % Calculate variance in frequency domain at each time point
+            if obj.verbose
+                % Spectrogram of complex magnitudes
+                figure(obj.fig_id);
+                subplot(3, 2, 1);
+                imagesc(s_abs(:, 1:10000));
+                colorbar;
+
+                % Spectrogram smoothed with median filter
+                subplot(3, 2, 2);
+                s_abs_filt = medfilt1(s_abs, 1); % Does first order do anything?
+                imagesc(s_abs_filt(:, 1:10000));
+                colorbar;
+
+                % Differences between adjacent frequency magnitudes at each time point
+                % (i.e. rough derivative in frequency domain)
+                subplot(3, 2, 3);
+                s_diff = diff(s_abs_filt, 1);
+                imagesc(s_diff(:, 1:10000));
+                colorbar;
+
+                % Absolute values of differences
+                subplot(3, 2, 4);
+                s_diff_abs = abs(s_diff);
+                imagesc(s_diff_abs(:, 1:10000));
+                colorbar;
+
+                % Median difference at each time point
+                subplot(3, 2, 5);
+                s_var = median(s_diff_abs);
+                plot(s_var(1:10000));
+
+                % Increment for next figure
+                obj.fig_id = obj.fig_id + 1;
+            else
+                % One-line calculation
+                s_var = median(abs(diff(medfilt1(s_abs,1),1)));
+            end
+
+            % Smooth median variance
+            s_var_filt = filtfilt(Hd.sosMatrix, Hd.ScaleValues, s_var); % zero-phase filtering
+            if obj.verbose
+                % Settings
+                nbins = 10000;
+
+                % Histogram and plot of median variance
+                figure(obj.fig_id);
+                subplot(2,2,1);
+                hist(s_var, nbins);
+                subplot(2,2,2);
+                plot(s_var(1:10000));
+
+                % Histogram and plot of smoothed median variance
+                subplot(2,2,3)
+                plot(s_var, 'Marker', '.', 'LineStyle', 'none');
+                hold all;
+                plot(s_var_filt, 'Marker', '.', 'LineStyle', 'none');
+                subplot(2,2,4);
+                hist(s_var_filt, nbins);
+
+                % Increment for next figure
+                obj.fig_id = obj.fig_id + 1;
+            end
+            
+        end
+        
+        function [t_switch, in_patch] = get_patch_times_from_sound(...
+                obj, fft_pts, lp_pass, lp_stop, thresh)
             
             % Convert sound waveform to patch distances
-            bin_len = 1000;
-            filter_len = 500;
-            P = obj.sound_power(bin_len, filter_len);
+            s_var_filt = obj.get_spectrogram_variance(fft_pts, lp_pass, lp_stop);
 
             % Define patch and inter-patch time stamps
-            thresh = 0.008;
-            in_patch = (P > thresh); % true if in patch at time t
-
-            % Find minimum patch residence and travel times possible
-            struct = obj.load_var('UntitledWheelSpeed', false);
-            v_max = max(struct.Data) * 100; % cm/s
-            t_p_min = (obj.d_patch / v_max) / obj.dt; % ms
-            t_t_min = (obj.d_interpatch / v_max) / obj.dt; % ms
-
-            % Find timestamps associated with patch entry/exit
-            % 1) Over/under threshold crossing --> patch entry/exit
+            in_patch = (s_var_filt > thresh); % true if in patch at time t
             t_switch = find((in_patch + circshift(in_patch, -1)) == 1);
 
-            % 2) Ensure that patch/interpatch times are feasible
-            t_current = t_switch(1); % current length of patch/interpatch in ms
-            num_switches = 1; % number of threshold crossings since last entry/exit
-            in_patch_t = false; % currently in patch
-            true_switch = zeros(length(t_switch), 1); % feasible thresh crossings 
-            for i = 1:length(t_switch)
-                % Add duration of next switch
-                if i > 1
-                    t_current = t_current + (t_switch(i) - t_switch(i-1));
-                    num_switches = num_switches + 1;
-                end
-
-                % Get minimum feasible time between switches
-                if in_patch_t
-                    t_min = t_p_min;
-                else
-                    t_min = t_t_min;
-                end
-
-                % Switch corresponds to actual entry/exit if time is feasible
-                % and number of thresh crossings is even
-                if (t_current >= t_min) && (rem(num_switches, 2) == 1)
-                    true_switch(i) = 1;
-                    t_current = 0;
-                    num_switches = 0;
-                    in_patch_t = ~in_patch_t;
-                end  
-            end
-
-            % Update t_switch to checked version
-            t_switch = t_switch(logical(true_switch));
-            
-            % Update in_patch accordingly
-            % Credit: https://bit.ly/2In6AzM
-            in_patch = zeros(int32(obj.t_total), 1);
-            if rem(size(t_switch, 1), 2) == 1
-                t_switch_ = t_switch(1:end-1);
-            else
-                t_switch_ = t_switch;
-            end
-            t_switch_ = reshape(t_switch_', 2, [])';
-            lo = t_switch_(:, 1); up = t_switch_(:, 2);
-            n = cumsum([1; up(:) - lo(:) + 1]); % number of in_patch = true
-            z = ones(n(end)-1,1); % initial vector
-            z(n(1:end-1)) = [lo(1); lo(2:end)-up(1:end-1)]; % set skip points
-            in_patch(cumsum(z)) = 1; % cumulative sum to get indices
-            
         end
         
         function [t_switch, in_patch] = get_patch_times_from_position(obj)
@@ -161,46 +183,48 @@ classdef PatchExperiment < handle
             t_switch = find((in_patch + circshift(in_patch, -1)) == 1);
             
             % Plot verification
-            %figure(6);
-            %plot(x_t);
-            %figure(5);
-            %hold on;
-            %fig = area(max(wheel_speed) * in_patch);
-            %fig.FaceAlpha = 0.2;
-            %fig.FaceColor = 'blue';
-            %fig.EdgeColor = 'none';
-            %hold off;
+            if obj.verbose
+                figure(obj.fig_id);
+                plot(x_t);
+                hold on;
+                fig = area(max(wheel_speed) * in_patch);
+                fig.FaceAlpha = 0.2;
+                fig.FaceColor = 'blue';
+                fig.EdgeColor = 'none';
+                hold off;
+                obj.fig_id = obj.fig_id + 1;
+            end
             
         end
         
-        function [t_p, t_t, in_patch] = get_patch_times(obj)
-            % Get time information about patches from sound waveform
+        function [t_p, t_t] = get_patch_times(obj, t_switch, in_patch)
+            % Get time information about patches
             % - t_p: [num_patches, 1] array representing patch residence times
             % - t_t: [num_patches, 1] array representing interpatch start and end points
-            % - in_patch: [t_total, 1] vector representing whether or not in patch
-            if obj.use_sound
-                [t_switch, in_patch] = get_patch_times_from_sound(obj);
-            else
-                [t_switch, in_patch] = get_patch_times_from_position(obj);
-            end
             
-            % If end in middle of patch, drop last patch. 
-            % Otherwise, drop last travel time.
-            end_in_patch = (rem(size(t_switch, 1), 2) == 1);
+            % If start in patch, treat time=0 as first patch entry. If end 
+            % in middle of patch, drop last patch. Note that this combination
+            % always results in t_switch having an even number of components.
+            start_in_patch = in_patch(1);
+            end_in_patch = xor((rem(length(t_switch), 2) == 1), start_in_patch);
+            if start_in_patch
+                t_switch = [0; t_switch]; % insert zero at beginning for patch entry   
+            end
             if end_in_patch
-                t_switch = t_switch(1:length(t_switch)-1);
+                last_entry = t_switch(end); % hold value for travel time
+                t_switch = t_switch(1:end-1); % drop last patch entry
             end
             
             % patch residence time = t_exit - t_enter
             t_p = reshape(t_switch, 2, [])';
             t_p = t_p(:, 2) - t_p(:, 1);
 
-            % Get travel times between patches by inference
+            % Get travel times between patches by inference. 
             t_t = circshift(t_switch, -1);
             if end_in_patch
-                t_t(length(t_t)) = t_switch(length(t_switch)); % recover last entry point
+                t_t(end) = last_entry; % recover last entry point
             else
-                t_t = t_t(1:length(t_t)-2); % drop first and last inter-patch
+                t_t = t_t(1:end-2); % drop last inter-patch
             end
             t_t = reshape(t_t, 2, [])';
             t_t = t_t(:, 2) - t_t(:, 1);
@@ -214,6 +238,7 @@ classdef PatchExperiment < handle
             
         end
         
+        % TODO: update to work with zero reward decay
         function r_p = get_patch_rewards(obj)
             % Get total reward per reward
             
@@ -371,7 +396,7 @@ classdef PatchExperiment < handle
             theta_t = filter(1/filter_len * ones(filter_len, 1), 1, theta_t); % smooth theta
             theta_t = interp1(1:length(theta_t), theta_t, ...
                               linspace(1, length(theta_t), obj.t_total)); % interpolate to t_total
-            x_t = (theta_t / 360 * 60)';
+            x_t = (theta_t / 360 * 60)'; % column vector
             
         end
         
@@ -409,6 +434,7 @@ classdef PatchExperiment < handle
             % Interpolate and smooth wheel speed
             wheel_speed = filter(1/filter_len * ones(filter_len, 1), 1, wheel_speed);
             wheel_speed = interp1(1:length(wheel_speed), wheel_speed, linspace(1, length(wheel_speed), obj.t_total));
+            wheel_speed = wheel_speed'; % column vector
         end
         
         % Helper functions: Miscellaneous helper functions.
@@ -427,7 +453,8 @@ classdef PatchExperiment < handle
                 struct = getfield(struct, fieldname); % var_name
             else
                 msg = 'Variable %s not found.';
-                error(msg, var_name);
+                id = 'PatchExperiment:VarNotFound';
+                error(id, msg, var_name);
             end
             
         end
