@@ -2,7 +2,9 @@ function [filelist, training_days] = sort_training_files(filenames)
     % Sorts and removes irrelevant filenames from list of matlab data files
     % 
     % Args:
-    % - filenames: text file containing list of matlab data files (.mat)
+    % - filenames: text file containing list of matlab data files (.mat).
+    %   Data file names must contain training day as _d<day #>_ for
+    %   function to work.
     %
     % Returns:
     % - filelist: sorted and parsed list of filenames
