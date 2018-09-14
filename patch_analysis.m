@@ -4,6 +4,7 @@
 %   mouse, in numerical order
 % - plot_data: plot file data (e.g. power vs. time) while processing
 % - use_sound: use sound waveform for defining patches if position not available
+mouse_id = 'j5z1';
 filelist = 'matlist.txt';
 plot_data = false;
 %use_sound = false;
@@ -12,9 +13,9 @@ run_thresh = 0.5;
 fig_id = 1;
 
 % Sort filelist and remove irrelevant filenames
-[filelist, training_days] = sort_training_files(filelist);
-start_idx = regexp(filelist{1}, 'j[0-9][a-z][0-9]_d');
-mouse_id = filelist{1}(start_idx:start_idx+3);
+[filelist, training_days] = sort_training_files(filelist, 'j5z1', 'Sound');
+%start_idx = regexp(filelist{1}, 'j[0-9][a-z][0-9]_d');
+%mouse_id = filelist{1}(start_idx:start_idx+3);
 
 %% Extract patch data
 % Settings
@@ -404,7 +405,8 @@ for i = 1:length(filelist)
         v_med = v_med(sort_idx);
     end
     figure(fig_id);
-    clf;
+    subplot(3, 4, i);
+    %clf;
     hold on;
     p1 = scatter(x, v, 2, 'Marker', '.'); % removes artifact
     p1.MarkerFaceAlpha = 0.02; % more transparent
@@ -425,7 +427,7 @@ for i = 1:length(filelist)
     L = {'all', 'mean', 'median', 'patch'};
     legend(LH, L);
     hold off;
-    fig_id = fig_id + 1;
+    %fig_id = fig_id + 1;
 end
 
 %% Analyze SDT statistics via sound waveform
@@ -434,8 +436,9 @@ end
 % either the sound waveform (here) or the trial results (as above). 
 
 % Settings
-verbose = true; % plot each step for understanding
-filename = 'j3z5_d16_2018_07_25_14_23_22.mat';
+fig_id = 1;
+verbose = false; % plot each step for understanding
+filename = 'j4z2_d31_2018_08_28_13_54_46.mat';
 fft_pts = 256; % size of window for fft
 lp_stop = 15; %Fst in Hz
 lp_pass = 14; %Fp in Hz
@@ -577,11 +580,11 @@ t_t = t_t * dt_s;
 
 % Filter infeasible times
 % TODO: move this to a while loop to calculate for t_switch, in_patch
-%v_max = max(pe.wheel_speed(500)); % cm/s
-%t_p_min = (pe.d_patch / v_max); % s
-%t_t_min = (pe.d_interpatch / v_max); % s
-%t_p_filt = t_p(t_p > t_p_min);
-%t_t_filt = t_t(t_t > t_t_min);
+v_max = max(pe.wheel_speed(500)); % cm/s
+t_p_min = (pe.d_patch / v_max); % s
+t_t_min = (pe.d_interpatch / v_max); % s
+t_p_filt = t_p(t_p > t_p_min);
+t_t_filt = t_t(t_t > t_t_min);
 
 if verbose
     figure(fig_id);
@@ -593,7 +596,7 @@ if verbose
     title('Patch Residence Times');
     xlabel('Patch #');
     ylabel('Time (s)');
-    legend(['t\_p', 't\_p\_filt']);
+    legend('t\_p', 't\_p\_filt');
 
     subplot(2, 1, 2);
     plot(t_t);
@@ -602,7 +605,7 @@ if verbose
     title('Travel Times');
     xlabel('Interpatch #');
     ylabel('Time (s)');
-    legend(['t\_t', 't\_t\_filt']);
+    legend('t\_t', 't\_t\_filt');
     
     fig_id = fig_id + 1;
 end
@@ -619,10 +622,12 @@ end
 % i.e. in the patch.
 
 % Settings
-fft_pts = 512; % size of window and number of frequency bins
+fft_window = 512; % size of window and number of frequency bins
 overlap = 256; % size of overlap between adjacent windows
-range = [1, 3e6]; % range of sound waveform to analyze
+fft_pts = 512; % number of fft points
 f_sample = 1 / dt_wf; % sampling rate of sound waveform
+plot_range = [0.0, 600.0]; % range to plot in seconds
+n_filter = 10; % order of 1D median filter to smooth power
 
 % Get target frequency times
 struct = pe.load_var('UntitledS_TarFreqHz', false);
@@ -631,14 +636,12 @@ f_target = struct.Data;
 % wavelet spectrogram, multi-taper spectrogram
 % Plot PSD (estimated from FFT) of sound waveform
 figure(fig_id);
-p1 = subplot(3, 1, 1);
-%spectrogram(sound_wf(range(1):range(2)), fft_pts, overlap, fft_pts, f_sample, 'yaxis');
-[s2, f2, t2] = spectrogram(sound_wf(range(1):range(2)), ...
-                        fft_pts, ...
-                        overlap, ...
-                        fft_pts, ...
-                        f_sample);
-surf(t2, f2/1000, log10(abs(s2).^2), 'EdgeColor', 'none'); % plot estimate of PSD
+p1 = subplot(5, 1, 1);
+[s2, f2, t2] = spectrogram(sound_wf, fft_window, overlap, fft_pts, f_sample);
+dt_s2 = t2(2) - t2(1); % time bin size in spectrogram
+plot_idx = max(round(plot_range / dt_s2), 1);
+plot_idx = plot_idx(1):plot_idx(2);
+surf(t2(plot_idx), f2/1000, log10(abs(s2(:, plot_idx)).^2), 'EdgeColor', 'none'); % plot estimate of PSD
 axis xy; axis tight; view(0,90); % make similar to spectrogram() fn
 xlabel('Time (s)');
 ylabel('Frequency (kHz)');
@@ -649,27 +652,39 @@ hold off;
 xl = xlim;
 
 % Plot PSD in target frequency band
-p2 = subplot(3, 1, 2);
+p2 = subplot(5, 1, 2);
 %fbin_target = round(f_target / ((f_sample/2) / floor(fft_pts/2 + 1))) + 1;
 [~, fbin_target] = min(abs(f_target - f2)); % bin closest to target frequency
 s2_abs = abs(s2); % complex magnitude
-num_tbins = floor( ((range(2)-range(1))-overlap)/(fft_pts-overlap) );
-t_s2 = linspace(0, range(2)-range(1), num_tbins) * dt_wf;
-plot(t_s2, s2_abs(fbin_target, :));
+num_tbins = floor( (length(sound_wf)-overlap)/(fft_window-overlap) );
+t_s2 = linspace(0, length(sound_wf), num_tbins) * dt_wf;
+plot(t_s2(plot_idx), s2_abs(fbin_target, plot_idx));
 xlim(xl);
-linkaxes([p1, p2], 'x');
-p3 = subplot(3, 1, 3);
+p3 = subplot(5, 1, 3);
 histogram(s2_abs(fbin_target, :), 100);
+set(gca, 'YScale', 'log');
+s2_abs_filt = medfilt1(s2_abs, n_filter, [], 2);
+p4 = subplot(5, 1, 4);
+plot(t_s2(plot_idx), s2_abs_filt(fbin_target, plot_idx));
+linkaxes([p1, p2, p4], 'x');
+p5 = subplot(5, 1, 5);
+histogram(s2_abs_filt(fbin_target, :), 100);
 set(gca, 'YScale', 'log');
 
 % Align plots; get() returns [x, y, width, height]
 pos1 = get(p1, 'Position'); 
 pos2 = get(p2, 'Position');
 pos3 = get(p3, 'Position');
+pos4 = get(p4, 'Position');
+pos5 = get(p5, 'Position');
 pos2(3) = pos1(3);
 pos3(3) = pos1(3);
+pos4(3) = pos1(3);
+pos5(3) = pos1(3);
 set(p2, 'Position', pos2);
 set(p3, 'Position', pos3);
+set(p4, 'Position', pos4);
+set(p5, 'Position', pos5);
 
 fig_id = fig_id + 1;
 
@@ -677,7 +692,7 @@ fig_id = fig_id + 1;
 
 % Settings
 p_thresh = 1e-10; % threshold of selecting target frequency for tc vs. target
-power_thresh = 2.5; % threshold of target frequency being played
+power_thresh = 2.0; % threshold of target frequency being played
 t_thresh = 0.5; % threshold of target tone duration (s)
 
 % Find numbers of bins corresponding to chance probability
@@ -695,7 +710,7 @@ m = (t_chord/1000)/dt_s2; % number of bins per chord
 bin_thresh = ceil(m * log(p_thresh) / log(p_f)); % # of bins corresponding to p_thresh
 
 % Find time points during which target frequency power > threshold
-idx_target = s2_abs(fbin_target, :) > power_thresh;
+idx_target = s2_abs_filt(fbin_target, :) > power_thresh;
 idx_start = find((idx_target - circshift(idx_target, 1)) == 1);
 idx_end = find((idx_target - circshift(idx_target, 1)) == -1);
 idx_target = [idx_start; idx_end]'; % [start, end]
@@ -705,9 +720,9 @@ t_target = idx_target * dt_s2; % convert to time (s)
 
 % Plot target start times
 figure(fig_id);
-plot(t_s2, s2_abs(fbin_target, :));
+plot(t_s2, s2_abs_filt(fbin_target, :));
 hold on;
-scatter(t_s2(idx_target), power_thresh*ones(numel(idx_target), 1));
+scatter(t_s2(reshape(idx_target, 1, [])), power_thresh*ones(numel(idx_target), 1));
 hold off;
 fig_id = fig_id + 1;
 
@@ -721,6 +736,7 @@ t_lick = find( (lick > lick_thresh) - circshift((lick > lick_thresh), 1) == 1);
 t_lick = t_lick(2:end) * dt_lick;
 
 %% Is lick time accurate?
+%{
 lick_sensor = pe.load_var('UntitledLickSensor', false);
 lick_sensor = lick_sensor.Data;
 lick_time = pe.load_var('UntitledLickTime', false);
@@ -747,97 +763,94 @@ hold off;
 xlabel('Lick #');
 ylabel('Time (s)');
 fig_id = fig_id + 1;
+%}
 
 %% Classify lick in patch
+% Settings
+pause_thresh = 2.0; % min duration between licks to count as separate lick train
+pad = [-1.0 0.5];
+
 t_patch = reshape(t_switch * dt_s, 2, [])';
+num_patches = length(t_patch);
+num_target = zeros(num_patches, 1);
+num_hit = zeros(num_patches, 1);
+num_fa = zeros(num_patches, 1);
+lick_result = zeros(length(t_lick), 1);
 
-% Test patch 1
-t_lick_i = t_lick(in_interval(t_lick, t_patch(1, :)));
-t_target_i = t_target(in_interval(t_target(:, 1), t_patch(1, :)), :); 
-lick_result_i = zeros(length(t_lick_i), 1);
+% Iterate through each patch
+for i = 1:num_patches
 
-% Iterate through each lick to classify as:
-% - Hit: lick during target (1)
-% - FA: lick during no target (2)
-% - N/A: within 1.0 second of previously classified lick (0)
-pause_thresh = 1.0; % min duration between licks to count as separate lick train
-num_hit = 0;
-num_fa = 0;
-current_target = 1;
-
-is_hit = in_interval(t_lick_i(1), t_target_i(current_target, :));
-if is_hit
-    lick_result_i(1) = 1;
-    num_hit = num_hit + 1;
-    current_target = current_target + 1;
-else
-    lick_result_i(1) = 2;
-    num_fa = num_fa + 1;
-end
-for i = 2:length(t_lick_i)
-    % Determine if lick in same target as previous
-    if current_target > 1
-        in_prev_target = in_interval(t_lick_i(i), t_target_i(current_target-1, :));
+    % Set up placeholders
+    t_lick_i = t_lick(in_interval(t_lick, t_patch(i, :)));
+    t_target_i = t_target(in_interval(t_target(:, 1), t_patch(i, :)), :); 
+    
+    % Iterate through each lick to classify as:
+    % - Hit: lick during target (1)
+    % - FA: lick during no target (2)
+    % - N/A: within 1.0 second of previously classified lick (0)  
+    num_hit_i = 0;
+    num_fa_i = 0;
+    %current_target = 1;
+    current_lick = find(in_interval(t_lick, t_patch(i, :)), 1);
+    
+    if isempty(t_target_i)
+        t_target_i = [0.0, 0.0];
+        num_target(i) = 0;
     else
-        in_prev_target = false;
+        num_target(i) = size(t_target_i, 1);
     end
-
-    % Classify lick only if 1) beginning of new lick train and 2) did not
-    % occur during same target as previous lick
-    if (t_lick_i(i) - t_lick_i(i-1) > pause_thresh) && ~in_prev_target
-        is_hit = in_interval(t_lick_i(i), t_target_i(current_target, :));
-        if is_hit
-            lick_result_i(i) = 1;
-            num_hit = num_hit + 1;
-            current_target = current_target + 1;
-        else
-            lick_result_i(i) = 2;
-            num_fa = num_fa + 1;
+      
+    % Classify each lick
+    for j = 1:length(t_lick_i)
+        % Get current target
+        current_target = find(t_target_i(:, 2) + pad(2) > t_lick_i(j), 1);
+        if isempty(current_target)
+            current_target = size(t_target_i, 1);
         end
+        
+        % Determine if lick in same target as previous
+        if current_target > 1
+            in_prev_target = in_interval(t_lick_i(j), t_target_i(current_target-1, :) + pad);
+        else
+            in_prev_target = false;
+        end
+        
+        % Determine if lick in same train as previous
+        if j > 1
+            in_prev_train = (t_lick_i(j) - t_lick_i(j-1)) < pause_thresh;
+        else
+            in_prev_train = false;
+        end
+
+        % Classify lick only if 1) beginning of new lick train and 2) did not
+        % occur during same target as previous lick
+        if ~in_prev_train && ~in_prev_target
+            % If after last target, then classify as FA
+            if current_target > size(t_target_i, 1)
+                lick_result(current_lick) = 2;
+                num_fa_i = num_fa_i + 1;
+            
+            % Otherwise, check if during target
+            else
+                is_hit = in_interval(t_lick_i(j), t_target_i(current_target, :) + pad);
+                if is_hit
+                    lick_result(current_lick) = 1;
+                    num_hit_i = num_hit_i + 1;
+                    %current_target = current_target + 1;
+                else
+                    lick_result(current_lick) = 2;
+                    num_fa_i = num_fa_i + 1;
+                end
+            end
+        end
+
+        % Increment lick idx
+        current_lick = current_lick + 1;
     end
-end
-
-%% Plot lick raster on spectrogram
-figure(fig_id);
-clf(fig_id);
-colormap(bone);
-surf(t2, f2/1000, log10(abs(s2).^2), 'EdgeColor', 'none'); % plot estimate of PSD
-axis xy; axis tight; view(0,90); % make similar to spectrogram() fn
-xlabel('Time (s)');
-ylabel('Frequency (kHz)');
-colorbar;
-hold all;
-plot(xlim, [f_target/1000, f_target/1000], 'Color', 'black', 'LineStyle', '--');
-
-y = f_target/1000; % height of raster plot
-sz = diff(ylim)*0.05; % size of ticks
-c = [[0.4660*0.75, 0.6740*0.75, 0.1880*0.75]; % hit
-     [0.6350, 0.0780, 0.1840]; % fa
-     [0.25, 0.25, 0.25]]; % n/a
-p1 = raster_plot(t_lick_i(lick_result_i == 1), y, sz, c(1, :));
-p2 = raster_plot(t_lick_i(lick_result_i == 2), y, sz, c(2, :));
-p3 = raster_plot(t_lick_i(lick_result_i == 0), y, sz, c(3, :));
-ps = [p1 p2 p3];
-names = {'hit (lick)', 'fa (lick)', 'n/a (lick)'};
-for i = 1:length(ps)
-    if ~isempty(ps(i))
-        legend(ps(i), names{i});
-    end
-end
-hold off;
-%fig_id = fig_id + 1;
-
-% Calculate in-patch hit and fa rates
-target_duration = pe.load_var('Settings', false);
-target_duration = str2double(target_duration.Property.SoundConfigurationTargetSoundConfigTargetDurationsec);
-num_targets = size(t_target_i, 1);
-hit_rate_i = num_hit / num_targets;
-num_cr = (diff(t_patch(1, :)) - (num_fa * target_duration)) / target_duration;
-fa_rate_i = num_fa / (num_fa + num_cr);
-if verbose
-    % display hit and fa rate
-    hit_rate_i
-    fa_rate_i
+    
+    % Update patch data
+    num_hit(i) = num_hit_i;
+    num_fa(i) = num_fa_i;
 end
 
 %% Compare lick results with motor and trial data
@@ -851,62 +864,416 @@ t_motor = find( (motor > motor_thresh) - circshift((motor > motor_thresh), 1) ==
 t_motor = t_motor * dt_motor;
 
 %% Classify motor in patch
+% Settings
+pad = [-0.5 1.5]; % time before/after target to associate motor with target
 
-t_motor_i = t_motor(in_interval(t_motor, t_patch(1, :)));
-motor_result_i = zeros(length(t_motor_i), 1);
-%% Iterate through each reward pump
+% Set up placeholders
+num_hit_motor = zeros(num_patches, 1);
+num_catch = zeros(num_patches, 1);
+motor_result = zeros(length(t_motor), 1);
 
-% Iterate through each reward pump to classify as:
-% - Hit: pump during (or immediately after) target (1)
-% - Catch: pump not during (or immediately after) target (2)
-num_hit = 0;
-num_catch = 0;
-current_target = 1;
-pad = [0.0 1.0]; % time before/after target to associate motor with target
+% Iterate through each patch
+for i = 1:num_patches
+    t_target_i = t_target(in_interval(t_target(:, 1), t_patch(i, :)), :);
+    t_motor_i = t_motor(in_interval(t_motor, t_patch(i, :)));
 
-for i = 1:length(t_motor_i)
-    % Classify motor based on proximity to target interval
-    is_hit = in_interval(t_motor_i(i), t_target_i(current_target, :) + pad);
-    if is_hit
-        motor_result_i(i) = 1;
-        num_hit = num_hit + 1;
-        current_target = current_target + 1;
-    else
-        motor_result_i(i) = 2;
-        num_catch = num_catch + 1;
+    % Iterate through each reward pump to classify as:
+    % - Hit: pump during (or immediately after) target (1)
+    % - Catch: pump not during (or immediately after) target (2)
+    num_hit_i = 0;
+    num_catch_i = 0;
+    %current_target = 1;
+    current_motor = find(in_interval(t_motor, t_patch(i, :)), 1);
+
+    if isempty(t_target_i)
+        t_target_i = [0.0, 0.0];
     end
+    
+    for j = 1:length(t_motor_i)
+        % Get current target
+        current_target = find(t_target_i(:, 2) + pad(2) > t_motor_i(j), 1);
+        if isempty(current_target)
+            current_target = size(t_target_i, 1);
+        end
+        
+        % If after last target, then classify as catch
+        if current_target > size(t_target_i, 1)
+            motor_result(current_motor) = 2;
+            num_catch_i = num_catch_i + 1;
+
+        % Otherwise, check if during target
+        else
+            % Classify motor based on proximity to target interval
+            is_hit = in_interval(t_motor_i(j), t_target_i(current_target, :) + pad);
+            if is_hit
+                motor_result(current_motor) = 1;
+                num_hit_i = num_hit_i + 1;
+                %current_target = current_target + 1;
+            else
+                motor_result(current_motor) = 2;
+                num_catch_i = num_catch_i + 1;
+            end
+        end
+        
+        % Increment motor idx
+        current_motor = current_motor + 1;
+    end
+    
+    num_hit_motor(i) = num_hit_i;
+    num_catch(i) = num_catch_i;
 end
 
-%% Plot motor raster on spectrogram
+%% Plot lick and motor raster on spectrogram
 figure(fig_id);
+clf(fig_id);
+colormap(bone);
+plot_idx = max(round(plot_range / dt_s2), 1);
+plot_idx = plot_idx(1):plot_idx(2);
+surf(t2(plot_idx), f2/1000, log10(abs(s2(:, plot_idx)).^2), 'EdgeColor', 'none'); % plot estimate of PSD
+axis xy; axis tight; view(0,90); % make similar to spectrogram() fn
+xlabel('Time (s)');
+ylabel('Frequency (kHz)');
+colorbar;
+hold all;
+plot(xlim, [f_target/1000, f_target/1000], 'Color', 'black', 'LineStyle', '--');
+
+y = f_target/1000; % height of raster plot
+sz = diff(ylim)*0.05; % size of ticks
+c = [[0.4660*0.75, 0.6740*0.75, 0.1880*0.75]; % hit
+     [0.6350, 0.0780, 0.1840]; % fa
+     [0.25, 0.25, 0.25]]; % n/a
+t_lick_plot = t_lick(in_interval(t_lick, plot_range));
+lick_result_plot = lick_result(in_interval(t_lick, plot_range));
+p1 = raster_plot(t_lick_plot(lick_result_plot == 1), y, sz, c(1, :), 'hit (lick)');
+p2 = raster_plot(t_lick_plot(lick_result_plot == 2), y, sz, c(2, :), 'fa (lick)');
+p3 = raster_plot(t_lick_plot(lick_result_plot == 0), y, sz, c(3, :), 'n/a (lick)');
+
+
 y = f_target/1000 - diff(ylim)*0.10; % height of raster plot
 sz = diff(ylim)*0.05; % size of ticks
 c = [[0.4660*0.75, 0.6740*0.75, 0.1880*0.75]; % hit
      [0.6350, 0.0780, 0.1840]]; % catch
-hold all;
-p1 = raster_plot(t_motor_i(motor_result_i == 1), y, sz, c(1, :));
-p2 = raster_plot(t_motor_i(motor_result_i == 2), y, sz, c(2, :));
-ps = [p1 p2];
-names = {'hit (motor)', 'catch (motor)'};
-for i = 1:length(ps)
-    if ~isempty(ps(i))
-        legend(ps(i), names{i});
-    end
-end
+t_motor_plot = t_motor(in_interval(t_motor, plot_range));
+motor_result_plot = motor_result(in_interval(t_motor, plot_range));
+p4 = raster_plot(t_motor_plot(motor_result_plot == 1), y, sz, c(1, :), 'hit (motor)');
+p5 = raster_plot(t_motor_plot(motor_result_plot == 2), y, sz, c(2, :), 'catch (motor)');
+ps = [p1 p2 p3 p4 p5];
+legend(ps);
 hold off;
 fig_id = fig_id + 1;
 
-% Calculate in-patch hit rate and compare with previous calculation
-hit_rate_i_motor = num_hit / num_targets;
+%% Calculate in-patch sdt statistics
+target_duration = pe.load_var('Settings', false);
+target_duration = str2double(target_duration.Property.SoundConfigurationTargetSoundConfigTargetDurationsec);
+%num_targets = size(t_target_i, 1);
+hit_rate = num_hit ./ num_target;
+num_cr = ((t_patch(:, 2) - t_patch(:, 1)) - (num_fa * target_duration)) / target_duration;
+fa_rate = num_fa ./ (num_fa + num_cr);
+[d_prime, c] = get_patch_sdt_statistics(hit_rate, fa_rate);
+
+% Plot sdt statistics over patches
+figure(fig_id);
+clf(fig_id);
+hold on;
+yyaxis left;
+p1 = plot(hit_rate, 'DisplayName', 'HR');
+p2 = plot(fa_rate, 'DisplayName', 'FA');
+ylim([-0.1 1.1]);
+yyaxis right;
+p3 = plot(d_prime, 'DisplayName', 'd`');
+p4 = plot(c, 'DisplayName', 'c');
+hold off;
+title('SDT Statistics per Patch');
+xlabel('Patch #');
+legend([p1 p2 p3 p4]);
+fig_id = fig_id + 1;
+
+%% Calculate in-patch hit rate and compare with previous calculation
+hit_rate_motor = num_hit_motor ./ num_target;
 if verbose
-    hit_rate_i_motor
+    hit_rate_motor
 end
-if hit_rate_i_motor ~= hit_rate_i
+if ~isequal(hit_rate_motor, hit_rate)
     % display hit and fa rate
-    msg = 'Hit rates are not equal: %d (lick) vs. %d (motor)';
+    msg = 'Hit rates are not equal';
     id = 'PatchAnalysis:CalculationMismatch';
-    warning(id, msg, hit_rate_i, hit_rate_i_motor);
+    warning(id, msg);
 end
+
+%% Calculate harvest rates per patch
+% Old code: constant reward volume
+%{
+num_rewards = num_hit_motor + num_catch;
+reward_volume = 5.0;
+t_segment = t_p + [t_t; 0.0];
+harvest_rate = (num_rewards * reward_volume) ./ t_segment;
+%}
+
+% New code: variable reward volume
+% Categorize trials by patch number
+trial_results = pe.load_var('UntitledTrialResult', false);
+trial_results = trial_results.Data;
+reward_ul = pe.load_var('UntitledRewarduL', false);
+reward_ul = reward_ul.Data;
+t_0 = pe.load_var('UntitledAIStartms', false);
+t_0 = t_0.Data;
+t_trial = pe.load_var('UntitledTrialStartms', false);
+t_trial = (t_trial.Data - t_0)/1000; % seconds, starting at 0.0
+r_patch = zeros(num_patches, 1);
+
+for i = 1:num_patches
+    idx_trials = find(in_interval(t_trial, t_patch(i, :)));
+    reward_ul_i = reward_ul(idx_trials);
+    trial_results_i = trial_results(idx_trials);
+    reward_ul_i = reward_ul_i(trial_results_i == 0 | trial_results_i == 3);
+    r_patch(i) = sum(reward_ul_i);
+end
+
+if length(t_p) ~= length(t_t)
+    t_segment = t_p + [t_t; 0.0];
+else
+    t_segment = t_p + t_t;
+end
+harvest_rate = r_patch ./ t_segment;
+
+% Plot harvest rate
+figure(fig_id);
+clf;
+plot(harvest_rate);
+title('Harvest Rate per Patch-Interpatch Segment');
+xlabel('Patch #');
+ylabel('Reward (uL) / s');
+fig_id = fig_id + 1;
+
+%% Calculate distribution of leaving time from last reward/lick
+last_lick = zeros(num_patches, 2); % [timestamp, lick_result]
+last_reward = zeros(num_patches, 2); % [timestamp, reward_volume]
+trial_results = pe.load_var('UntitledTrialResult', false);
+trial_results = trial_results.Data;
+reward_ul = pe.load_var('UntitledRewarduL', false);
+reward_ul = reward_ul.Data;
+reward_ul = reward_ul(trial_results == 0 | trial_results == 3); % only rewarded trials
+
+for i = 1:num_patches
+    % Find index of last lick in patch
+    last_lick_idx = find(in_interval(t_lick, t_patch(i, :)), 1, 'last');
+    
+    % If N/A, then find most recent non-N/A lick
+    if lick_result(last_lick_idx) == 0
+        last_lick_idx = find(lick_result(1:last_lick_idx) ~= 0, 1, 'last');
+    end
+    
+    % Add last non-N/A lick
+    if isempty(last_lick_idx)
+        last_lick(i, :) = [NaN, NaN];
+    else
+        last_lick(i, :) = [t_lick(last_lick_idx), lick_result(last_lick_idx)];
+    end
+    
+    % Add last reward
+    last_reward_idx = find(in_interval(t_motor, t_patch(i, :)), 1, 'last');
+    if isempty(last_reward_idx)
+        last_reward(i, :) = [NaN, NaN];
+    else
+        last_reward(i, :) = [t_motor(last_reward_idx), reward_ul(last_reward_idx)];
+    end
+end
+
+%% Plot distribution of leaving times to last lick and reward
+% Settings
+no_outliers = true;
+
+% Setup
+figure(fig_id);
+clf(fig_id);
+if no_outliers
+    no_nan_lick = ~isnan(last_lick(:, 1));
+    std_lick = std(t_patch(no_nan_lick, 2) - last_lick(no_nan_lick, 1));
+    idx_lick_outlier = find( abs(t_patch(:, 2) - last_lick(:, 1)) > 3*std_lick );
+    last_lick_plot = last_lick;
+    last_lick_plot(idx_lick_outlier) = NaN;
+                 
+    no_nan_reward = ~isnan(last_reward(:, 1));
+    std_reward = std(t_patch(no_nan_reward, 2) - last_reward(no_nan_reward, 1));
+    idx_reward_outlier = find( abs(t_patch(:, 2) - last_reward(:, 1)) > 3*std_reward );
+    last_reward_plot = last_reward;
+    last_reward_plot(idx_reward_outlier, :) = NaN;
+else
+    last_lick_plot = last_lick;
+    last_reward_plot = last_reward;
+end
+
+% Plot time from last lick
+subplot(2, 2, 1);
+idx_hit = find(last_lick_plot(:, 2) == 1);
+idx_fa = find(last_lick_plot(:, 2) == 2);
+scatter(idx_hit, t_patch(idx_hit, 2) - last_lick_plot(idx_hit, 1));
+hold on;
+scatter(idx_fa, t_patch(idx_fa, 2) - last_lick_plot(idx_fa, 1));
+legend('hit', 'false alarm');
+
+subplot(2, 2, 2);
+nbins = 50;
+h1 = histogram(t_patch(:, 2) - last_lick_plot(:, 1), nbins);
+text(5.0, 5.0, sprintf('bin width: %.2f', h1.BinWidth));
+
+% Plot time from last reward
+subplot(2, 2, 3);
+reward_bins = [0.0, 2.0, 4.0, 6.0, 8.0, 10.0, 12.0];
+legend_plots = cell(length(reward_bins), 1);
+legend_names = cell(length(reward_bins), 1);
+hold on;
+for i = 1:length(reward_bins)-1
+    idx_reward = find((last_reward_plot(:, 2) >= reward_bins(i)) & ...
+                      (last_reward_plot(:, 2) < reward_bins(i+1)));
+    legend_plots{i} = scatter(idx_reward, t_patch(idx_reward, 2) - last_reward_plot(idx_reward, 1));
+    legend_names{i} = sprintf('%d <= r < %d', reward_bins(i), reward_bins(i+1));
+end
+idx_reward = find(last_reward_plot(:, 2) >= reward_bins(end));
+legend_plots{end} = scatter(idx_reward, t_patch(idx_reward, 2) - last_reward_plot(idx_reward, 1));
+legend_names{end} = sprintf('r >= %d', reward_bins(end));
+%legend(legend_plots, legend_names);
+legend(legend_names);
+hold off;
+
+subplot(2, 2, 4);
+nbins = 50;
+max_time = max(t_patch(:, 2) - last_reward_plot(:, 1));
+edges = 0:max_time/nbins:max_time;
+hold on;
+for i = 1:length(reward_bins)-1
+    idx_reward = find((last_reward_plot(:, 2) >= reward_bins(i)) & ...
+                      (last_reward_plot(:, 2) < reward_bins(i+1)));
+    if ~isempty(idx_reward)            
+        [N, e] = histcounts(t_patch(idx_reward, 2) - last_reward_plot(idx_reward, 1), edges);
+        N_ = N;
+    else
+        N = NaN(length(edges)-1, 1);
+    end
+    plot(edges(1:end-1) + 0.5*max_time/nbins, N);    
+end
+idx_reward = find(last_reward_plot(:, 2) >= reward_bins(end));
+if ~isempty(idx_reward)            
+    [N, e] = histcounts(t_patch(idx_reward, 2) - last_reward_plot(idx_reward, 1), edges);
+else
+    N = NaN(length(edges)-1, 1);
+end
+N = histcounts(t_patch(idx_reward, 2) - last_reward_plot(idx_reward, 1), edges);
+plot(edges(1:end-1) + 0.5*max_time/nbins, N);
+text(5.0, 5.0, sprintf('bin width: %.2f', max_time/nbins));
+legend(legend_names);
+hold off;
+
+%% Get optimal leaving time
+% Settings
+filename = 'j5z2_d21_2018_09_06_09_17_41.mat';
+fit_discrete = true; % use discretized reward function
+show_all_tangents = true; % debugging for MVT plot
+
+% Get parameters
+%d_interpatch = 20.0; % cm
+%r_0 = 12.0; % uL
+%a = 0.10; % rate of exponential decay
+pe = PatchExperiment(filename);
+d_interpatch = pe.d_interpatch; % interpatch distance (cm)
+struct = pe.load_var('Settings', false);
+r_0 = str2double(struct.Property.SoundConfigurationRunConfigRewarduL); % initial reward (uL)
+a = str2double(struct.Property.SoundConfigurationRunConfigDecay)/100; % decay rate
+
+t_iti = 1.5; % intertrial interval (s)
+t_target_start = str2double(...
+    struct.Property.SoundConfigurationTargetSoundConfigAvgStartsec); % average time to target (s)
+t_target_duration = str2double(...
+    struct.Property.SoundConfigurationTargetSoundConfigTargetDurationsec); % target duration (s)
+t_avg = t_iti + t_target_start + t_target_duration;
+t_t_min = d_interpatch / 5.0; % averaging 5 cm/s over speed up + slow down
+n_t_min = t_t_min / t_avg;
+
+% Discrete version
+%{
+Exponential decay: r(n) = r_0*(1-a)^n, n = 0, 1, 2, ...
+Cumulative reward: r_c(n) = r_0 + r_1 + r_2 + ... + r_n
+Optimal travel time for each reward: solve for negative x-intercept of line
+tangent to curve at each point in r_c(n)
+Optimal number of trials: first number of trials such that optimal travel
+time equals or exceeds minimum possible travel time
+Optimal harvest rate: optimal cumulative reward at leaving (r_c(n_opt))
+divided by time of single patch-interpatch segment
+%}
+if fit_discrete
+    n = (1:1:30)'; % trial numbers
+    r = r_0 * (1-a).^(n-1);
+    r_c = cumsum(r);
+    t_t_opt = -(n - r_c ./ r) .* t_avg; % optimal travel time for each reward decrement
+    n_opt = find(t_t_opt >= t_t_min, 1); % closest optimal number of trials
+    r_opt = r(n_opt);
+    h_opt = r_c(n_opt) / (t_t_min + n_opt*t_avg);
+
+% Smooth version
+%{
+Exponential decay: r(n) = r_0*(1-a)^n, n >= 0
+Cumulative reward: integral of r(n) from 0 to n
+Optimal number of trials: number of trials n_opt such that line from
+(-t_travel, 0) to (n_opt, r_c(n_opt)) is tangent to r_c curve (solve
+point slope equation of line)
+Optimal harvest rate: optimal cumulative reward at leaving (r_c(n_opt))
+divided by time of single patch-interpatch segment
+Note choice of indexing:
+- 0-indexed: r_c(1) = integral of r_0 to r_0*(1-a)
+- 1-indexed: r_c(1) = integral of r_0/(1-a) to r_0
+%}
+else
+    n = (0:0.1:30)';
+    r = @(n) r_0*(1-a).^n;
+    r_c = @(n) r_0/log(1-a).*((1-a).^n - 1);
+    syms x;
+    n_opt = double(vpasolve(((1-a).^x).*(n_t_min + x - 1/log(1-a)) + 1/log(1-a) == 0, x));
+    r_opt = r(n_opt);
+    h_opt = r_c(n_opt) / (t_t_min + n_opt*t_avg);
+end
+
+% Plot reward decay and cumulative reward curves
+figure(fig_id);
+clf(fig_id);
+subplot(2, 1, 1);
+if fit_discrete
+    plot(n, r);
+    hold on;
+    plot(n, r_c);
+    hold off;
+    subplot(2, 1, 2);
+    plot(n, r_c);
+else
+    plot(n, r(n));
+    hold on;
+    plot(n, r_c(n));
+    hold off;
+    subplot(2, 1, 2);
+    plot(n, r_c(n));
+end
+hold on;
+n_ = -10:1:30; % points (n_, f(n_)) to be plot, where f(x) is tangent line
+
+% Plot series of tangent lines (debugging/visualization),
+% where i = point (i, r(i)) on r_c curve on tangent line
+if show_all_tangents
+    for i = 1:10
+        plot(n_, r(i).*(n_ - i) + r_c(i), 'LineStyle', ':');
+    end
+end
+
+% Plot best-fit tangent line
+plot(n_, r(n_opt).*(n_- n_opt) + r_c(n_opt), 'LineStyle', '-');
+
+% Plot target travel time and leaving time as intersection of lines
+y_limits = [-10.0 120.0];
+plot(n_, zeros(length(n_), 1), 'LineStyle', '--', 'Color', 'black');
+plot(-[n_t_min, n_t_min], y_limits, 'LineStyle', '--', 'Color', 'black');
+plot(n_, ones(length(n_), 1)*r_c(n_opt), 'LineStyle', '--', 'Color', 'black');
+plot([n_opt, n_opt], y_limits, 'LineStyle', '--', 'Color', 'black');
+
+ylim(y_limits);
+hold off;
 
 %% Functions
 function is_in_interval = in_interval(t, varargin)
@@ -920,7 +1287,7 @@ function is_in_interval = in_interval(t, varargin)
         t1 = varargin{1};
         t2 = varargin{2};
     else
-        error('Number of input argument must be one or two.');
+        error('Number of input arguments must be one or two.');
     end
     
     % t is in interval if t1 < t < t2
@@ -929,13 +1296,36 @@ function is_in_interval = in_interval(t, varargin)
     is_in_interval = ((after_t1 + before_t2) == 2);
 end
 
-function p = raster_plot(xs, y, sz, c)
+function p = raster_plot(xs, y, sz, c, name)
     ax = gca;
     co = ax.ColorOrderIndex;
     p = [];
     for i = 1:length(xs)
         ax.ColorOrderIndex = co;
-        p = line([xs(i), xs(i)], [y - sz/2, y + sz/2], 'LineWidth', 0.5, 'Color', c);
+        p = line([xs(i), xs(i)], [y - sz/2, y + sz/2], ...
+                 'LineWidth', 0.5, ...
+                 'Color', c, ...
+                 'DisplayName', name);
     end
     ax.ColorOrderIndex = co + 1;
+end
+
+function [d_prime, c] = get_patch_sdt_statistics(hit_rate, fa_rate)
+    % Calculate z-scores for hit rate and fa rate. Assume they are
+    % sampled from a cumulative Gaussian distribution ~ N(0, 1).
+    mu = 0.0;
+    sigma = 1.0;
+    pd = makedist('Normal',mu,sigma);
+    hit_rate(isnan(hit_rate)) = 0.0;
+    hit_rate = max(min(hit_rate, 0.99), 0.01); % avoids z = +/-inf
+    fa_rate(isnan(fa_rate)) = 0.0;
+    fa_rate = max(min(fa_rate, 0.99), 0.01); % avoids z = +/-inf
+    z_hit_rate = icdf(pd, hit_rate) / sigma;
+    z_fa_rate = icdf(pd, fa_rate) / sigma;
+
+    % Calculate d` = z(hit_rate) - z(fa_rate)
+    d_prime = z_hit_rate - z_fa_rate;
+
+    % Calculate c = -(z(hit_rate) + z(fa_rate)) / 2
+    c = -(z_hit_rate + z_fa_rate) / 2; % note negative sign
 end
