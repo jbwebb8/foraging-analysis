@@ -1,10 +1,11 @@
-function [filelist, training_days] = sort_training_files(filenames)
+function [filelist, training_days] = sort_training_files(filenames, mouse_id, exclude_str)
     % Sorts and removes irrelevant filenames from list of matlab data files
     % 
     % Args:
     % - filenames: text file containing list of matlab data files (.mat).
-    %   Data file names must contain training day as _d<day #>_ for
+    %   Data file names must be of the format <mouse_id>_d<day #>_ for
     %   function to work.
+    % - mouse_id: id of of mouse contained in filenames
     %
     % Returns:
     % - filelist: sorted and parsed list of filenames
@@ -12,6 +13,15 @@ function [filelist, training_days] = sort_training_files(filenames)
     
     % Get filenames from text file
     filelist = importdata(filenames);
+    
+    % Keep mouse_id files not containing exclude_str
+    keep_idx = zeros(length(filelist), 1);
+    for i = 1:length(filelist)
+        is_mouse_id = ~isempty(regexp(filelist{i}, mouse_id));
+        no_exclude_str = isempty(regexp(filelist{i}, exclude_str));
+        keep_idx(i) = is_mouse_id && no_exclude_str;
+    end
+    filelist = filelist(logical(keep_idx));
     
     % Sort filelist
     training_days = zeros(length(filelist), 1);
