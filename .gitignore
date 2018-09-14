@@ -1,3 +1,6 @@
 # matlab files
 *.asv
 *.m~
+
+# jupyter notebook
+.ipynb_checkpoints/*
