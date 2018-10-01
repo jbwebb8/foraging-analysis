@@ -4,16 +4,16 @@
 %   mouse, in numerical order
 % - plot_data: plot file data (e.g. power vs. time) while processing
 % - use_sound: use sound waveform for defining patches if position not available
-mouse_id = 'j5z1';
+mouse_id = 'j5z4';
 filelist = 'matlist.txt';
 plot_data = false;
 %use_sound = false;
 stop_thresh = 0.1;
 run_thresh = 0.5;
-fig_id = 1;
+%fig_id = 3;
 
 % Sort filelist and remove irrelevant filenames
-[filelist, training_days] = sort_training_files(filelist, 'j5z1', 'Sound');
+[filelist, training_days] = sort_training_files(filelist, mouse_id, 'Sound');
 %start_idx = regexp(filelist{1}, 'j[0-9][a-z][0-9]_d');
 %mouse_id = filelist{1}(start_idx:start_idx+3);
 
@@ -1274,6 +1274,49 @@ plot([n_opt, n_opt], y_limits, 'LineStyle', '--', 'Color', 'black');
 
 ylim(y_limits);
 hold off;
+
+%% Plot harvest rate in one session
+
+%% Plot harvest rate over multiple sessions
+r_total = zeros(length(filelist), 1);
+t_total = zeros(length(filelist), 1);
+for i = 1:length(filelist)
+    pe = PatchExperiment(filelist{i});
+    try
+        r_trial = pe.load_var('UntitledRewarduL', false); r_trial = r_trial.Data;
+        result = pe.load_var('UntitledTrialResult', false); result = result.Data;
+        r_total(i) = sum((result == 0 | result == 3) .* r_trial);
+        t_0 = pe.load_var('UntitledAIStartms', false); t_0 = t_0.Data;
+        t_end = pe.load_var('UntitledPatchEndms', false); t_end = t_end.Data(end);
+        t_total(i) = (t_end - t_0) / 1000;
+    catch ME
+        fprintf('Ignoring file %s\n', filelist{i});
+        r_total(i) = NaN;
+        t_total(i) = NaN;
+    end
+end
+harvest_rate = r_total ./ t_total;
+
+figure(fig_id);
+%plot(harvest_rate);
+chamberc = zeros(length(filelist), 1);
+for i = 1:length(filelist)
+    chamberc(i) = ~isempty(regexp(filelist{i}, 'ChamberC', 'once'));
+end
+chamberc = logical(chamberc);
+idx = 1:length(filelist);
+scatter(idx(~chamberc), harvest_rate(~chamberc));
+hold on;
+scatter(idx(chamberc), harvest_rate(chamberc));
+legend('A, B', 'C');
+
+title(mouse_id);
+xlabel('Training Day');
+xticks(1:length(filelist));
+xticklabels(training_days);
+ylabel('Harvest Rate (uL/s)');
+%xlim([0 length(harvest_rate)+1]);
+fig_id = fig_id + 1;
 
 %% Functions
 function is_in_interval = in_interval(t, varargin)

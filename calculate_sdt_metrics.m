@@ -13,7 +13,7 @@ function [hit_rate, fa_rate, d_prime, c] = calculate_sdt_metrics(results, min_tr
     % 
     % Calculations:
     % Hit rate is sum(results == 0) / sum((results == 0) + (results == 1))
-    % FA rate can be naively calculated as sum(results == 4) / sum(results > 1);
+    % FA rate can be naively calculated as sum(results == 2) / sum(results > 1);
     % however, a better way is to sum the total time of not licking while no 
     % signal is present during each trial type (i.e. continuous assessment of
     % whether or not signal is present):
