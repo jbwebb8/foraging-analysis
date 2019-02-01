@@ -1,6 +1,9 @@
 # matlab files
-*.asv
-*.m~
+matlab/*.asv
+matlab/*.m~
 
 # jupyter notebook
-.ipynb_checkpoints/*
+python/.ipynb_checkpoints/*
+
+# vs code
+.vscode/*
