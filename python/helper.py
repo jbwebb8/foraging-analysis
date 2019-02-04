@@ -1,3 +1,4 @@
+### Waveform analysis ###
 def med_filt(x, n=3):
     X = np.zeros([n, len(x)])
     for i in range(n):
@@ -28,12 +29,6 @@ def smooth_waveform_variance(wf, fs, med_filter_size=30, butter_filter_fc=10):
     s_var_smooth = lowpass_butter_filter(s_var_smooth, fs_s, butter_filter_fc)
 
     return fs_s, t_s, s_var_smooth
-
-def in_interval(t, t1, t2):
-    gt_t1 = (t[np.newaxis, :] > t1[:, np.newaxis])
-    lt_t2 = (t[np.newaxis, :] < t2[:, np.newaxis])
-    
-    return np.sum(np.logical_and(gt_t1, lt_t2).astype(np.int32), axis=0)
 
 def find_threshold(s, n_bins=25):
     """
@@ -68,6 +63,8 @@ def find_threshold(s, n_bins=25):
     # Return threshold halfway between two peaks
     return np.mean(x_peaks)
 
+
+### Patch-foraging theory ###
 def cumulative_reward(t_p, R_0, r_0, tau):
     return r_0 * tau * (1.0 - np.exp(-t_p / tau)) + R_0
     
@@ -86,3 +83,19 @@ def get_optimal_values(t_t, R_0, r_0, tau):
     r_opt = cumulative_reward(t_p_opt, R_0, r_0, tau)
     
     return t_p_opt, r_opt
+
+
+### Utility functions ###
+def _check_list(names):
+    """
+    Changes variable to list if not already an instance of one.
+    """
+    if not isinstance(names, list):
+        names = [names]
+    return names
+
+def in_interval(t, t1, t2):
+    gt_t1 = (t[np.newaxis, :] > t1[:, np.newaxis])
+    lt_t2 = (t[np.newaxis, :] < t2[:, np.newaxis])
+    
+    return np.sum(np.logical_and(gt_t1, lt_t2).astype(np.int32), axis=0)
