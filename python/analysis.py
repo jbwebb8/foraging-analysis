@@ -1,4 +1,4 @@
-from helper import _check_list
+from helper import _check_list, in_interval
 
 # Initial methods to make:
 # - harvest rate
@@ -44,19 +44,69 @@ def get_lick_decisions(sess, min_interval=None):
     # Find max peak associated with lick-bout
     h_max = np.max(hist)
     idx_max = np.argmax(hist)
+
+    # Set threshold as first bin significantly after peak
+    thresh = bin_edges[idx_max + 1] + 0.5*bin_width
     for i in range(idx_max + 1, len(hist)):
         if hist[i] < (0.1 * h_max):
-
+            thresh = bin_edges[i] + 0.5*bin_width
+            break
     
-    bin_edges[np.argmax(hist)] + 0.5*bin_width
+    # Filter licks by time from previous lick
+    idx_decision = np.insert(np.diff(t_lick) > thresh, 0, 0)
+    t_decision = t_lick[idx_decision]
 
-
-
+    return t_decision
     
-def get_lick_stats(sess):
+def get_lick_stats(sess, per_patch=True):
     """
-    Returns d` and bias for licking in vs. out of patch.
+    Returns statistics for licking in vs. out of patch.
+
+    Args:
+    - sess: Session instance
+
+    Returns:
+    - stats: dictionary of lick statistics
+        - n_total: total number of lick decisions
+        - n_patch: number of lick decisions in patch(es)
+        - n_interpatch: number of lick decisions in interpatch(es)
+        - f_patch: lick decision rate in patch(es)
+        - f_interpatch: lick decision rate in interpatch(es)
     """
+    # Get timestamps associated with lick decisions
+    t_decision = get_lick_decisions(sess)
+
+    # Get timestamps associated with patch entry/exit
+    t_patch = sess.get_patch_times()
+
+    # Determine number of licks per patch/interpatch
+    n_patch = in_interval(t_decision, 
+                          t_patch[:, 0], 
+                          t_patch[:, 1])
+    n_interpatch = in_interval(t_decision, 
+                               t_patch[:, 1], 
+                               np.append(t_patch[1:, 0], sess.vars['t_total']))
+    
+    # Determine lick rates per patch/interpatch
+    dt_patch = sess.get_patch_durations()
+    dt_interpatch = sess.get_interpatch_durations()
+    if per_patch:
+        f_patch = n_patch / dt_patch
+        f_interpatch = n_interpatch / dt_interpatch
+    else:
+        n_patch = np.sum(n_patch)
+        n_interpatch = np.sum(n_interpatch)
+        f_patch = n_patch / np.sum(dt_patch)
+        f_interpatch = n_interpatch / np.sum(dt_interpatch)
+
+    lick_stats = {'n_total': n_total,
+                  'n_patch': n_patch,
+                  'n_interpatch': n_interpatch,
+                  'f_patch': f_patch,
+                  'f_interpatch': f_interpatch}
+    
+    return lick_stats
+
 
 
 

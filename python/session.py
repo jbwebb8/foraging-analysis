@@ -1,7 +1,8 @@
 import h5py
 import numpy as np
-from helper import smooth_waveform_variance, in_interval, find_threshold, \
-                   cumulative_reward, get_optimal_values
+from helper import smooth_waveform_variance, find_threshold, \
+                   cumulative_reward, get_optimal_values, compare_patch_times
+from util import in_interval
 
 class Session:
 
@@ -11,19 +12,23 @@ class Session:
         self.f = h5py.File(filename)
 
         # Set global attributes
-        self.data_names = ['sound', 'motor', 'lick', 'wheel_speed', 'wheel_position']
-        self.var_names = ['t_patch', 't_stop']
+        self.data_names = ['sound', 'motor', 'lick', 'fs', 'wheel_speed', 
+                           'wheel_position', 'dt_patch']
+        self.var_names = ['t_patch', 'in_patch', 't_stop', 's_var',
+                          'fs_s', 't_s', 't_motor', 'dt_motor', 't_lick']
         self.settings = {}
         struct = self.f['Settings']['Property']
 
         # IDs
+        self.settings['global'] = {}
         self.settings['global']['version'] = \
             self._ASCII_to_string(struct['SoftwareVersion'])
         self.settings['global']['chamber_id'] = \
             self._ASCII_to_string(struct['ChamberID'])
 
         # Tone cloud
-        s = 'SoundConfigurationTargetSoundConfig'
+        s = 'SoundConfigurationToneCloudConfig'
+        self.settings['tone_cloud'] = {}
         self.settings['tone_cloud']['low_freq'] = \
             self._ASCII_to_float(struct[s + 'LowFreqHz'])
         self.settings['tone_cloud']['hi_freq'] = \
@@ -37,6 +42,7 @@ class Session:
 
         # Target sound
         s = 'SoundConfigurationTargetSoundConfig'
+        self.settings['target_sound'] = {}
         self.settings['target_sound']['low_freq'] = \
             self._ASCII_to_float(struct[s + 'TargetLowHz'])
         self.settings['target_sound']['hi_freq'] = \
@@ -66,23 +72,27 @@ class Session:
             names = [names]
         for name in names:
             if name in self.data_names:
-                self.data[name] = self._load_data(name)
+                if name not in self.data.keys():
+                    self.data[name] = self._load_data(name)
             else:
-                raise Warning('Variable name \'%s\' not recognized.' % name)
+                raise Warning('Data name \'%s\' not recognized.' % name)
     
     def _load_data(self, name):
+        chamber_number = self.settings['global']['chamber_id'][-1]
         if name == 'sound':
-            return self.f['UntitledSound' + self.chamber_id[-1]]['Data'][0, :]
+            return self.f['UntitledSound' + chamber_number]['Data'][0, :]
         elif name == 'lick':
-            return self.f['UntitledLick' + self.chamber_id[-1]]['Data'][0, :]
+            return self.f['UntitledLick' + chamber_number]['Data'][0, :]
         elif name == 'motor':
-            return self.f['UntitledMotor' + self.chamber_id[-1]]['Data'][0, :]
+            return self.f['UntitledMotor' + chamber_number]['Data'][0, :]
         elif name == 'fs':
-            return 1.0 / self.f['UntitledSound' + self.chamber_id[-1]]['Property']['wf_increment'][0, 0]
+            return 1.0 / self.f['UntitledSound' + chamber_number]['Property']['wf_increment'][0, 0]
         elif name == 'wheel_speed':
             return self.f['UntitledWheelSpeed']['Data'][0, :] * 100 # cm/s
         elif name == 'wheel_time':
             return self.f['UntitledWheelTime']['Data'][0, :]
+        elif name == 'dt_patch':
+            return self.f['UntitledPatchTime']['Data'][0, :]
         else:
             return self._load_subclass_data(name)
 
@@ -95,7 +105,7 @@ class Session:
         for name in names:
             if name in self.var_names:
                 if name not in self.vars.keys():
-                    self.var[name] = self._load_var(name)
+                    self.vars[name] = self._load_var(name)
             else:
                 raise Warning('Variable name \'%s\' not recognized.' % name)
 
@@ -106,6 +116,8 @@ class Session:
             return self.preprocess_sound(name)
         elif name in ['t_motor', 'dt_motor']:
             return self.get_motor_times(name)
+        elif name == 't_lick':
+            return self.get_lick_times()
         
     def _check_attributes(self, data_names=None, var_names=None):
         if data_names is not None:
@@ -128,14 +140,15 @@ class Session:
         else:
             raise ValueError('Name \'%s\' not recognized.' % var_name)
 
-    def get_patch_times(self, var_name):
-        required_vars = ['dt_patch']
-        self._check_attributes(var_names=required_vars)
+    def get_patch_times(self, var_name='t_patch'):
+        required_data = ['dt_patch']
+        self._check_attributes(data_names=required_data)
 
         t_patch, in_patch, t_stop = \
             self.get_patches_from_sound()
-        
-        if self.compare_patch_times(np.diff(t_patch, axis=1), self.vars['dt_patch']):
+        dt_patch = np.diff(t_patch, axis=1).flatten()
+
+        if compare_patch_times(dt_patch, self.data['dt_patch']):
             if var_name == 't_patch':
                 return t_patch
             elif var_name == 'in_patch':
@@ -147,7 +160,7 @@ class Session:
         else:
             raise Warning('Patch durations from sound and log file do not match.')
 
-    def _get_patches_from_sound(s, fs, thresh):
+    def _get_patches_from_sound(self, s, fs, thresh):
         # Determine data points in patch based on sound variance
         in_patch = (s < thresh).astype(np.int32)
         
@@ -185,11 +198,12 @@ class Session:
             
         t_patch_start = t_patch_start.astype(np.float64) / fs
         t_patch_end = t_patch_end.astype(np.float64) / fs
-        t_stop = t_stop.astype(np.float64) / fs
+        t_patch = np.vstack([t_patch_start, t_patch_end]).T
+        t_stop = t_stop.astype(np.float64) / fs - 0.5 # to account for error
         
-        return np.hstack([t_patch_start, t_patch_end]), in_patch, t_stop
+        return t_patch, in_patch, t_stop
 
-    def get_patches_from_sound(auto_thresh=True, init_thresh=5.0e-9):
+    def get_patches_from_sound(self, auto_thresh=True, init_thresh=5.0e-9):
         required_data = ['dt_patch']
         required_vars = ['s_var', 'fs_s']
         self._check_attributes(data_names=required_data,
@@ -206,10 +220,11 @@ class Session:
         
         # Attempt to extract patches with initial threshold
         t_patch, in_patch, t_stop = \
-            _get_patches_from_sound(s, fs_s, thresh=thresh)
+            self._get_patches_from_sound(s, fs_s, thresh=thresh)
+        dt_patch = np.diff(t_patch, axis=1).flatten()
         
         # Check for agreement with logged patch durations
-        if not compare_patch_times(np.diff(t_patch, axis=1), self.vars['dt_patch']):
+        if not compare_patch_times(dt_patch, self.data['dt_patch']):
             #print('Initial threshold failed. Trying range of values...')
             
             # Try range of values for threshold until agreement reached
@@ -217,31 +232,33 @@ class Session:
             for thresh in thresh_range:
                 try:
                     t_patch, in_patch, t_stop = \
-                        _get_patches_from_sound(s, fs_s, thresh=thresh)
+                        self._get_patches_from_sound(s, fs_s, thresh=thresh)
+                    dt_patch = np.diff(t_patch, axis=1).flatten()
+                    if compare_patch_times(dt_patch, self.data['dt_patch']):
+                        #print('Successful threshold found: %.2e' % thresh)
+                        break
                 except IndexError: # empty array handling
                     pass
-                if compare_patch_times(np.diff(t_patch, axis=1), self.vars['dt_patch']):
-                    #print('Successful threshold found: %.2e' % thresh)
-                    break
-
+                
         return t_patch, in_patch, t_stop
 
-    def compare_patch_times(dt_patch_1, dt_patch_2, tol=1.0):
-        """
-        Compare patch durations from two sources 
-        (e.g. sound waveform analysis vs. logged data)
-        
-        Note: When comparing to logged data, the number of patches alone
-        is not sufficient to check for the correct handling of the sound 
-        waveform. Comparing times directly is not only more robust, but 
-        if the session ended in a patch, it is not clear when that patch
-        duration is logged, meaning the number of patches can differ by 
-        one even with correct waveform analysis.
-        """
-        idx_last = min(len(dt_patch_1), len(dt_patch_2))
-        return np.isclose(dt_patch_1[:idx_last], 
-                        dt_patch_2[:idx_last],
-                        atol=tol).all()
+    def get_patch_durations(self):
+        # Requirements
+        req_vars = ['t_patch']
+        self._check_attributes(var_names=req_vars)
+
+        return np.diff(self.vars['t_patch'], axis=1)
+
+    def get_interpatch_durations(self):
+        # Requirements
+        req_vars = ['t_patch', 't_stop']
+        self._check_attributes(var_names=req_vars)
+
+        t_switch = np.reshape(self.vars['t_patch'], [-1], order='C')
+        t_interpatch = np.append(t_switch[1:], self.vars['t_stop'])
+        t_interpatch = np.reshape(t_interpatch, [-1, 2])
+
+        return np.diff(t_interpatch, axis=1)
 
     def get_motor_times(self, var_name):
         # Requirements
@@ -366,15 +383,15 @@ class FreeSession(Session):
 
     def __init__(self, filename):
         # Initialize Session
-        super.__init__(self, filename)
+        super().__init__(filename)
 
         # Set class instance attributes
-        self.var_names += ['reward']
+        self.data_names += ['reward']
         struct = self.f['Settings']['Property']
-        
 
         # Run configuration
         s = 'SoundConfigurationRunConfig'
+        self.settings['run_config'] = {}
         self.settings['run_config']['session_duration'] = \
             self._ASCII_to_float(struct[s + 'SessionTimemin'])
         self.settings['run_config']['noise_level'] = \
@@ -395,10 +412,10 @@ class FreeSession(Session):
             self._ASCII_to_float(struct[s + 'IniRateuLsec'])
         self.settings['run_config']['tau'] = \
             self._ASCII_to_float(struct[s + 'TCsec'])
-        self.settings['run_config']['r_low'] = \
-            self._ASCII_to_float(struct[s + 'ThresholduL'])
-        self.settings['run_config']['end_target_reward'] = \
-            self._ASCII_to_bool(struct[s + 'Endtargetreward'])
+        #self.settings['run_config']['r_low'] = \
+        #    self._ASCII_to_float(struct[s + 'ThresholduL'])
+        self.settings['run_config']['end_target_trial'] = \
+            self._ASCII_to_bool(struct[s + 'Endtargettrial'])
         self.settings['run_config']['v_low'] = \
             self._ASCII_to_bool(struct[s + 'VThresholdms'])
         self.settings['run_config']['end_patch_speed'] = \
@@ -411,7 +428,7 @@ class FreeSession(Session):
     def _get_max_harvest_rate(self, per_patch=True, return_all=False):
         # Requirements
         required_vars = ['t_patch', 't_stop']
-        self._check_attributes(data_names=required_data)
+        self._check_attributes(var_names=required_vars)
 
         # Grab session settings
         R_0 = self.settings['run_config']['r_init']
@@ -456,17 +473,7 @@ class FreeSession(Session):
         tau = self.settings['run_config']['tau']
 
         # Minimum travel time: R_0 / r_0
-        if t_t < (R_0 / r_0):
-            raise Warning('Travel time is less than minimum. Ignoring R_0.')
-            R_0 = 0.0
-        
-        # Solve non-linear equation for residence time
-        F = lambda x: (r_0 * np.exp(-x/tau) * (t_t + x + tau)) - (r_0 * tau) - R_0
-        #t_p = broyden1(F, -100) # negative solution
-        t_p_opt = broyden1(F, 10*tau) # positive solution
-        
-        # Calculate total harvested reward for optimal residence time
-        r_opt = cumulative_reward(t_p_opt, R_0, r_0, tau)
+        t_p_opt, r_opt = get_optimal_values(t_t, R_0, r_0, tau)
         
         if return_all:
             return r_opt / (t_p_opt + t_t), r_opt, t_p_opt, t_t

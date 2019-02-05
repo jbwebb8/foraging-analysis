@@ -7,3 +7,6 @@ python/.ipynb_checkpoints/*
 
 # vs code
 .vscode/*
+
+# compiled code
+*.pyc
