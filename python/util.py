@@ -24,11 +24,19 @@ def find_files(path, files):
     return files
 
 ### Array handling ###
-def in_interval(t, t1, t2):
+def in_interval(t, t1, t2, query='event'):
     gt_t1 = (t[np.newaxis, :] > t1[:, np.newaxis])
     lt_t2 = (t[np.newaxis, :] < t2[:, np.newaxis])
-    
-    return np.sum(np.logical_and(gt_t1, lt_t2).astype(np.int32), axis=0)
+    bt_t1_t2 = np.logical_and(gt_t1, lt_t2)
+
+    if query == 'event':
+        return np.sum(bt_t1_t2.astype(np.int32), axis=0)
+    elif query == 'interval':
+        return np.sum(bt_t1_t2.astype(np.int32), axis=1)
+    elif query == 'array':
+        return bt_t1_t2
+    else:
+        raise SyntaxError('Unknown query \'%s\'.' % query)
 
 def flatten_list(a):
     """Converts list of arrays into single 1D array"""
