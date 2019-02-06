@@ -1,4 +1,5 @@
-from helper import _check_list, in_interval
+from util import _check_list, in_interval
+import numpy as np
 
 # Initial methods to make:
 # - harvest rate
@@ -82,10 +83,12 @@ def get_lick_stats(sess, per_patch=True):
     # Determine number of licks per patch/interpatch
     n_patch = in_interval(t_decision, 
                           t_patch[:, 0], 
-                          t_patch[:, 1])
+                          t_patch[:, 1],
+                          query='interval')
     n_interpatch = in_interval(t_decision, 
                                t_patch[:, 1], 
-                               np.append(t_patch[1:, 0], sess.vars['t_total']))
+                               np.append(t_patch[1:, 0], sess.vars['t_stop']),
+                               query='interval')
     
     # Determine lick rates per patch/interpatch
     dt_patch = sess.get_patch_durations()
@@ -99,7 +102,7 @@ def get_lick_stats(sess, per_patch=True):
         f_patch = n_patch / np.sum(dt_patch)
         f_interpatch = n_interpatch / np.sum(dt_interpatch)
 
-    lick_stats = {'n_total': n_total,
+    lick_stats = {'n_total': np.sum(n_patch) + np.sum(n_interpatch),
                   'n_patch': n_patch,
                   'n_interpatch': n_interpatch,
                   'f_patch': f_patch,
@@ -107,7 +110,69 @@ def get_lick_stats(sess, per_patch=True):
     
     return lick_stats
 
+def get_entry_stats(sess, per_patch=True):
 
+    # Get timestamps associated with lick decisions
+    t_decision = get_lick_decisions(sess)
 
+    # Get timestamps associated with patch entry/exit
+    t_patch = sess.get_patch_times()
 
+    # Find first lick after patch entry
+    in_patch = in_interval(t_decision, 
+                           t_patch[:, 0], 
+                           t_patch[:, 1], 
+                           query='array')
+    idx_patch, idx_ = np.unique(np.argwhere(in_patch)[:, 0], return_index=True)
+    idx_lick = np.argwhere(in_patch)[idx_, 1]
+
+    # Calculate time to first lick from patch entry
+    t_delay = t_decision[idx_lick] - t_patch[idx_patch, 0]
+
+    if per_patch:
+        return t_delay
+    else:
+        return np.median(t_delay)
+
+def get_exit_stats(sess, per_patch=True):
+
+    # Get timestamps associated with lick decisions and rewards
+    t_decision = get_lick_decisions(sess)
+    t_reward = sess.vars['t_motor']
+
+    # Get timestamps associated with patch entry/exit
+    t_patch = sess.get_patch_times()
+
+    # Find last lick before patch exit
+    in_patch = in_interval(t_decision, 
+                           t_patch[:, 0], 
+                           t_patch[:, 1], 
+                           query='array')
+    idx_patch, idx_, counts = np.unique(np.argwhere(in_patch)[:, 0], 
+                                        return_index=True, 
+                                        return_counts=True)
+    idx_ += counts - 1
+    idx_lick = np.argwhere(in_patch)[idx_, 1]
+
+    # Calculate time to last lick before patch exit
+    t_leave_lick = t_patch[idx_patch, 1] - t_decision[idx_lick] 
+
+    # Find last reward before patch exit
+    in_patch = in_interval(t_reward, 
+                           t_patch[:, 0], 
+                           t_patch[:, 1], 
+                           query='array')
+    idx_patch, idx_, counts = np.unique(np.argwhere(in_patch)[:, 0], 
+                                        return_index=True, 
+                                        return_counts=True)
+    idx_ += counts - 1
+    idx_reward = np.argwhere(in_patch)[idx_, 1]
+
+    # Calculate time to last reward before patch exit
+    t_leave_reward = t_patch[idx_patch, 1] - t_reward[idx_reward]
+
+    if per_patch:
+        return t_leave_lick, t_leave_reward
+    else:
+        return np.median(t_leave_lick), np.median(t_leave_reward)
     
