@@ -123,13 +123,13 @@ class Session:
 
     def _load_var(self, name):
         if name in ['t_patch', 'in_patch', 't_stop']:
-            return self.get_patch_times(name)
+            return self._get_patch_times(name)
         elif name in ['s_var', 'fs_s', 't_s']:
             return self.preprocess_sound(name)
         elif name in ['t_motor', 'dt_motor']:
-            return self.get_motor_times(name)
+            return self._get_motor_times(name)
         elif name == 't_lick':
-            return self.get_lick_times()
+            return self._get_lick_times()
         
     def clear_vars(self, names=None):
         if names is not None:
@@ -163,6 +163,14 @@ class Session:
             raise ValueError('Name \'%s\' not recognized.' % var_name)
 
     def get_patch_times(self, var_name='t_patch'):
+        # Requirements
+        req_vars = [var_name]
+        self._check_attributes(var_names=req_vars)
+
+        return self.vars[var_name]
+
+    def _get_patch_times(self, var_name='t_patch'):
+        # Requirements
         required_data = ['dt_patch']
         self._check_attributes(data_names=required_data)
 
@@ -269,7 +277,7 @@ class Session:
         req_vars = ['t_patch']
         self._check_attributes(var_names=req_vars)
 
-        return np.diff(self.vars['t_patch'], axis=1)
+        return np.squeeze(np.diff(self.vars['t_patch'], axis=1))
 
     def get_interpatch_durations(self):
         # Requirements
@@ -280,9 +288,16 @@ class Session:
         t_interpatch = np.append(t_switch[1:], self.vars['t_stop'])
         t_interpatch = np.reshape(t_interpatch, [-1, 2])
 
-        return np.diff(t_interpatch, axis=1)
+        return np.squeeze(np.diff(t_interpatch, axis=1))
 
-    def get_motor_times(self, var_name):
+    def get_motor_times(self, var_name='t_motor'):
+        # Requirements
+        req_vars = [var_name]
+        self._check_attributes(var_names=req_vars)
+
+        return self.vars[var_name]
+    
+    def _get_motor_times(self, var_name='t_motor'):
         # Requirements
         req_data = ['motor', 'fs']
         req_vars = ['t_stop']
@@ -306,6 +321,13 @@ class Session:
             raise ValueError('Name \'%s\' not recognized.' % var_name)
 
     def get_lick_times(self):
+        # Requirements
+        req_vars = ['t_lick']
+        self._check_attributes(var_names=req_vars)
+
+        return self.vars['t_lick']
+    
+    def _get_lick_times(self):
         # Requirements
         req_data = ['lick', 'fs']
         req_vars = ['t_stop']
@@ -537,6 +559,14 @@ class FreeSession(Session):
             return r_opt / (t_p_opt + t_t), r_opt, t_p_opt, t_t
         else:
             return r_opt / (t_p_opt + t_t)
+    
+    @property
+    def d_interpatch(self):
+        return self.settings['run_config']['d_interpatch']
+    
+    @property
+    def d_patch(self):
+        return self.settings['run_config']['d_patch']
 
 
 class TrialSession(Session):
