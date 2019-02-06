@@ -1,8 +1,10 @@
 import h5py
+import re
+import pickle
 import numpy as np
 from helper import smooth_waveform_variance, find_threshold, \
                    cumulative_reward, get_optimal_values, compare_patch_times
-from util import in_interval
+from util import in_interval, _check_list
 
 class Session:
 
@@ -12,6 +14,8 @@ class Session:
         self.f = h5py.File(filename)
 
         # Set global attributes
+        match = re.search('_d[0-9]+_', filename)
+        self.day = int(match.group()[2:-1])
         self.data_names = ['sound', 'motor', 'lick', 'fs', 'wheel_speed', 
                            'wheel_position', 'dt_patch']
         self.var_names = ['t_patch', 'in_patch', 't_stop', 's_var',
@@ -99,6 +103,14 @@ class Session:
     def _load_subclass_data(self, name):
         pass
 
+    def clear_data(self, names=None):
+        if names is not None:
+            names = _check_list(names)
+            for name in names:
+                _ = self.data.pop(name)
+        else:
+            self.data = {}
+
     def load_vars(self, names):
         if not isinstance(names, list):
             names = [names]
@@ -119,11 +131,21 @@ class Session:
         elif name == 't_lick':
             return self.get_lick_times()
         
+    def clear_vars(self, names=None):
+        if names is not None:
+            names = _check_list(names)
+            for name in names:
+                _ = self.vars.pop(name)
+        else:
+            self.vars = {}
+
     def _check_attributes(self, data_names=None, var_names=None):
         if data_names is not None:
             self.load_data(data_names)
         if var_names is not None:
             self.load_vars(var_names)
+        if self.vars.get('t_stop', 1.0) <= 0.0:
+            raise Warning('Unanalyzable session: not enough patches.')
 
     def preprocess_sound(self, var_name):
         required_data = ['sound', 'fs']
@@ -377,6 +399,42 @@ class Session:
         t_seg_last = self.vars['t_stop'] - self.vars['t_patch'][-1, 0]
 
         return np.append(t_seg, t_seg_last)
+
+    @property
+    def n_patches(self):
+        """
+        Returns number of analyzable patch-interpatch segments
+        during session.
+        """
+        # Requirements
+        required_vars = ['t_patch']
+        self._check_attributes(var_names=required_vars)
+
+        return self.vars['t_patch'].shape[0]
+
+    def save(self, filepath):
+        """
+        Serializes dictionary of class instance to specificed location.
+        Can be subsequently loaded via:
+            sess.save(filepath)
+            new_sess = Session(data_file)
+            new_sess.load(filepath)
+        """
+        f = open(filepath, 'wb')
+        d = self.__dict__.copy()
+        _ = d.pop('f', None) # cannot pickle h5py
+        pickle.dump(d, f)
+        f.close()
+
+    def load(self, filepath):
+        """
+        Loads serialized dictionary of class instance.
+        """
+        f = open(filepath, 'rb')
+        d = pickle.load(f)
+        for k, v in d.items():
+            self.__dict__[k] = v # avoids overwriting h5py.File
+        f.close()
 
 
 class FreeSession(Session):

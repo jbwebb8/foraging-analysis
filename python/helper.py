@@ -92,7 +92,7 @@ def cumulative_reward(t_p, R_0, r_0, tau):
 def get_optimal_values(t_t, R_0, r_0, tau):
     # Minimum travel time: R_0 / r_0
     if t_t < (R_0 / r_0):
-        print('Travel time is less than minimum. Ignoring R_0.')
+        #print('Travel time is less than minimum. Ignoring R_0.')
         R_0 = 0.0
     
     # Solve non-linear equation for residence time
