@@ -14,8 +14,12 @@ class Session:
         self.f = h5py.File(filename)
 
         # Set global attributes
-        match = re.search('_d[0-9]+_', filename)
-        self.day = int(match.group()[2:-1])
+        match = re.search('_d[0-9]+[a-z]*_', filename, re.IGNORECASE)
+        day = match.group()[2:-1]
+        match = re.search('[a-z]+', day, re.IGNORECASE)
+        if match is not None:
+            day = day[:match.span()[0]]
+        self.day = int(day)
         self.data_names = ['sound', 'motor', 'lick', 'fs', 'wheel_speed', 
                            'wheel_position', 'dt_patch']
         self.var_names = ['t_patch', 'in_patch', 't_stop', 's_var',

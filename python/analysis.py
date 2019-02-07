@@ -102,9 +102,14 @@ def get_lick_stats(sess, per_patch=True):
         f_patch = n_patch / np.sum(dt_patch)
         f_interpatch = n_interpatch / np.sum(dt_interpatch)
 
-    lick_stats = {'n_total': np.sum(n_patch) + np.sum(n_interpatch),
+    # Determine total number of licks
+    n_total = np.sum(n_patch) + np.sum(n_interpatch)
+
+    # Save stats in dictionary
+    lick_stats = {'n_total': n_total,
                   'n_patch': n_patch,
                   'n_interpatch': n_interpatch,
+                  'f_total': n_total / sess.vars['t_stop'],
                   'f_patch': f_patch,
                   'f_interpatch': f_interpatch}
     
