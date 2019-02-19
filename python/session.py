@@ -361,7 +361,9 @@ class Session:
             required_data = ['reward']
             required_vars = ['t_patch', 't_motor', 'dt_motor']
             self._check_attributes(data_names=required_data, var_names=required_vars)
-
+            if self.vars['t_motor'].size == 0:
+                return np.zeros(self.vars['t_patch'].shape[0])
+            
             # Create linear map from motor duration to reward volume
             # (V = duration x flow_rate is not reliable)
             r_log = self.data['reward'][self.data['reward'] > 0]
@@ -507,7 +509,7 @@ class FreeSession(Session):
     
     def _load_subclass_data(self, name):
         if name == 'reward':
-            return self.f['UntitledRewarduL']['Data'][0, :]
+            return np.squeeze(self.f['UntitledRewarduL']['Data'])
     
     def _get_max_harvest_rate(self, per_patch=True, return_all=False):
         # Requirements
