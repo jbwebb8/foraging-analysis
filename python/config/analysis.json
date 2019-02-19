@@ -1,0 +1,21 @@
+{
+    "global": {
+        "exp_name": "j7",
+        "mouse_ids": ["j7z1", "j7z2"],
+        "data_directory": "Y:\\James\\data\\",
+        "exclude_strings": ["sound", "ephys", "error"],
+        "results_directory": "G:\\My Drive\\Projects\\foraging\\data\\analysis\\free_lick\\j7\\"    
+    },
+
+    "harvest_rate": {
+
+    },
+
+    "lick_rate": {
+
+    },
+
+    "plot_settings": {
+        "cmap": "copper"
+    }
+}
