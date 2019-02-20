@@ -10,3 +10,7 @@ python/.ipynb_checkpoints/*
 
 # compiled code
 *.pyc
+
+# config files
+config/*
+!config/template.json

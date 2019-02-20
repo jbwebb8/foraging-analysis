@@ -123,7 +123,7 @@ class Session:
                 if name not in self.vars.keys():
                     self.vars[name] = self._load_var(name)
             else:
-                raise Warning('Variable name \'%s\' not recognized.' % name)
+                raise SyntaxError('Variable name \'%s\' not recognized.' % name)
 
     def _load_var(self, name):
         if name in ['t_patch', 'in_patch', 't_stop']:
@@ -149,7 +149,7 @@ class Session:
         if var_names is not None:
             self.load_vars(var_names)
         if self.vars.get('t_stop', 1.0) <= 0.0:
-            raise Warning('Unanalyzable session: not enough patches.')
+            raise UserWarning('Unanalyzable session: not enough patches.')
 
     def preprocess_sound(self, var_name):
         required_data = ['sound', 'fs']
@@ -192,7 +192,7 @@ class Session:
             else:
                 raise ValueError('Name \'%s\' not recognized.' % var_name)
         else:
-            raise Warning('Patch durations from sound and log file do not match.')
+            raise ValueError('Patch durations from sound and log file do not match.')
 
     def _get_patches_from_sound(self, s, fs, thresh):
         # Determine data points in patch based on sound variance
@@ -310,7 +310,7 @@ class Session:
         # Find motor timestamps and durations
         idx_stop = int(self.vars['t_stop'] * self.data['fs'])
         motor = self.data['motor'][:idx_stop]
-        thresh = 0.9 * np.max(motor)
+        thresh = 2.5 # half of 5V square wave
         is_pump = (motor > thresh).astype(np.int32)
         idx_pump_start = (np.argwhere((is_pump - np.roll(is_pump, -1)) == -1) + 1).flatten()
         idx_pump_end = (np.argwhere((is_pump - np.roll(is_pump, -1)) == 1) + 1).flatten()

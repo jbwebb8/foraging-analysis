@@ -67,7 +67,7 @@ def find_threshold(s, n_bins=25):
     # Return threshold halfway between two peaks
     return np.mean(x_peaks)
 
-def compare_patch_times(dt_patch_1, dt_patch_2, tol=1.0):
+def compare_patch_times(dt_patch_1, dt_patch_2, atol=1.0, rtol=0.02):
         """
         Compare patch durations from two sources 
         (e.g. sound waveform analysis vs. logged data)
@@ -79,10 +79,18 @@ def compare_patch_times(dt_patch_1, dt_patch_2, tol=1.0):
         duration is logged, meaning the number of patches can differ by 
         one even with correct waveform analysis.
         """
+        # Corner case 1: last segment unreliably logged
         idx_last = min(len(dt_patch_1), len(dt_patch_2))
+
+        # Corner case 2: first segment unreliably logged if too short
+        if min(dt_patch_1[0], dt_patch_2[0]) < 0.5:
+            dt_patch_1 = dt_patch_1[1:]
+            dt_patch_2 = dt_patch_2[1:]
+            idx_last -= 1
+
         return np.isclose(dt_patch_1[:idx_last], 
                           dt_patch_2[:idx_last],
-                          atol=tol).all()
+                          atol=atol, rtol=rtol).all()
 
 
 ### Patch-foraging theory ###
