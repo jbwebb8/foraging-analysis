@@ -1,6 +1,7 @@
 import numpy as np
 from scipy import signal
 from scipy.optimize import broyden1
+import warnings
 
 ### Waveform analysis ###
 def med_filt(x, n=3):
@@ -94,21 +95,87 @@ def compare_patch_times(dt_patch_1, dt_patch_2, atol=1.0, rtol=0.02):
 
 
 ### Patch-foraging theory ###
+def _to_array(a, max_len=None):
+    if max_len is None:
+        max_len = len(a)
+    if isinstance(a, np.ndarray): # broadcast if needed
+        return a * np.ones([max_len])
+    else: # assume single number
+        return np.asarray([a]) * np.ones([max_len])
+
 def cumulative_reward(t_p, R_0, r_0, tau):
     return r_0 * tau * (1.0 - np.exp(-t_p / tau)) + R_0
     
-def get_optimal_values(t_t, R_0, r_0, tau):
-    # Minimum travel time: R_0 / r_0
-    if t_t < (R_0 / r_0):
-        #print('Travel time is less than minimum. Ignoring R_0.')
-        R_0 = 0.0
+def get_optimal_values(*, t_p=None, t_t=None, R_0=None, r_0=None, tau=None):
+    """
+    Returns optimal value based on the marginal value theorem, based on values
+    of other parameters.
+
+    Args:
+    - t_p: Patch residence time.
+    - t_t: Travel time.
+    - R_0: Initial reward volume.
+    - r_0: Initial reward rate.
+    - tau: Decay constant.
+
+    Returns:
+    - opt: Optimal value of unknown parameter.
+    - r_opt: Amount of cumulative reward at optimal leaving time.
+    """
+
+    # Assert one unknown
+    loc = [t_p, t_t, R_0, r_0, tau]
+    n_unknown = len([kwarg for kwarg in loc if kwarg is None])
+    if n_unknown < 1:
+        raise SyntaxError('No unknowns.')
+    elif n_unknown > 1:
+        raise SyntaxError('Too many unknowns. Please specify all but one parameter.')
     
-    # Solve non-linear equation for residence time
-    F = lambda x: (r_0 * np.exp(-x/tau) * (t_t + x + tau)) - (r_0 * tau) - R_0
-    #t_p = scipy.optimize.broyden1(F, -100) # negative solution
-    t_p_opt = broyden1(F, 10*tau) # positive solution
+    # Convert to numpy arrays for vector handling
+    max_len = max([len(kwarg) if isinstance(kwarg, np.ndarray) else 1
+                   for kwarg in loc])
+    [t_p, t_t, R_0, r_0, tau] = [_to_array(kwarg, max_len) if kwarg is not None else None 
+                                 for kwarg in loc]
+
+    # Minimum travel time: R_0 / r_0
+    if (t_t is not None) and (R_0 is not None) and (r_0 is not None):
+        if np.sum(t_t < (R_0 / r_0)) > 0:
+            warnings.warn('Some data points exceed minimum travel time. R_0 set to zero.')
+            R_0[t_t < (R_0 / r_0)] = 0.0
+    
+    # Solve equation based on unknown
+    if t_p is None:
+        # Solve non-linear equation for residence time
+        F = lambda x: (r_0 * np.exp(-x/tau) * (t_t + x + tau)) - (r_0 * tau) - R_0
+        #t_p = scipy.optimize.broyden1(F, -100) # negative solution
+        t_p = broyden1(F, 10*tau) # positive solution
+        opt = t_p
+    elif t_t is None:
+        # Solve for travel time
+        t_t = ((r_0 * tau) + R_0)/(r_0 * np.exp(-t_p/tau)) + (t_p - tau)
+        opt = t_t
+    elif R_0 is None:
+        # Solve for initial reward
+        R_0 = (r_0 * np.exp(-t_p/tau) * (t_t + t_p + tau)) - (r_0 * tau)
+        opt = R_0
+    elif r_0 is None:
+        # Solve for initial rate of reward
+        if R_0 == 0.0:
+            print('Initial rate of return can be any positive number.')
+        r_0 = R_0 / (np.exp(-t_p/tau) * (t_t + t_p + tau) - tau)
+        opt = r_0
+    elif tau is None:
+        # Solve non-linear equation for decay rate
+        F = lambda x: (r_0 * np.exp(-t_p/x) * (t_t + t_p + x)) - (r_0 * x) - R_0
+        #tau = scipy.optimize.broyden1(F, -100) # negative solution
+        tau = broyden1(F, t_p) # positive solution
+        opt = tau
     
     # Calculate total harvested reward for optimal residence time
-    r_opt = cumulative_reward(t_p_opt, R_0, r_0, tau)
+    r_opt = cumulative_reward(t_p, R_0, r_0, tau)
     
-    return t_p_opt, r_opt
+    # Return number if only one value queried
+    if isinstance(opt, np.ndarray) and not isinstance(r_opt, np.ndarray):
+        opt = float(opt)
+    
+    return opt, r_opt
