@@ -86,7 +86,14 @@ class Session:
                 raise Warning('Data name \'%s\' not recognized.' % name)
     
     def _load_data(self, name):
-        chamber_number = self.settings['global']['chamber_id'][-1]
+        # Get chamber number (suffix for DAQ data)
+        chamber_id = self.settings['global']['chamber_id']
+        if 'ephys' in chamber_id.lower():
+            chamber_number = '1'
+        else:
+            chamber_number = self.settings['global']['chamber_id'][-1]
+
+        # Data names
         if name == 'sound':
             return self.f['UntitledSound' + chamber_number]['Data'][0, :]
         elif name == 'lick':
@@ -559,7 +566,7 @@ class FreeSession(Session):
         tau = self.settings['run_config']['tau']
 
         # Minimum travel time: R_0 / r_0
-        t_p_opt, r_opt = get_optimal_values(t_t, R_0, r_0, tau)
+        t_p_opt, r_opt = get_optimal_values(t_t=t_t, R_0=R_0, r_0=r_0, tau=tau)
         
         if return_all:
             return r_opt / (t_p_opt + t_t), r_opt, t_p_opt, t_t

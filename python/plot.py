@@ -15,7 +15,13 @@ class Plotter:
         self.style = kwargs.get('style', self.DEFAULT_SETTINGS['style'])
         # TODO: initiate pyplot settings
 
+        # Initial figure
+        self.fig = None
+
     def create_new_figure(self, figsize=(10, 10), rows=1, cols=1):
+        # Clear old figure
+        plt.close('all')
+        
         # Create figure and specified axes
         self.fig, self.axes = plt.subplots(rows, cols, figsize=figsize)
         
@@ -136,7 +142,7 @@ class Plotter:
             hr_diff_opt[mouse_id] = []
             for hr_opt_i, hr_obs_i in zip(hr_opt_mouse, hr_obs_mouse):
                 hr_diff_opt[mouse_id] = hr_obs_i - hr_opt_i
-        self.plot_learning_curve(hr_diff_opt, days, label='observed vs. optimal', **kwargs)
+        self.plot_learning_curve(days, hr_diff_opt, label='observed vs. optimal', **kwargs)
 
         # Plot difference between observed and max
         hr_diff_max = {}
@@ -144,7 +150,7 @@ class Plotter:
             hr_diff_max[mouse_id] = []
             for hr_max_i, hr_obs_i in zip(hr_max_mouse, hr_obs_mouse):
                 hr_diff_max[mouse_id] = hr_obs_i - hr_max_i
-        self.plot_learning_curve(hr_diff_max, days, label='observed vs. maximum', **kwargs)
+        self.plot_learning_curve(days, hr_diff_max, label='observed vs. maximum', **kwargs)
 
         # Plot settings
         self.ax.legend()
@@ -161,16 +167,16 @@ class Plotter:
         # Plot optimal data
         center = kwargs.get('center', 'mean')
         day_range = kwargs.get('day_range', None)
-        if day_range is None:
-            plot_idx = np.ones(len(days), dtype=np.bool)
-        else:
-            plot_idx = np.logical_and(days >= day_range[0], days <= day_range[1])
         t_p_opt_, days_ = get_patch_statistics(t_p_opt, 
                                                ids=days, 
                                                method=center,
                                                return_all=False)
-        ax.plot(days_[plot_idx], t_p_opt_[plot_idx], 
-                linestyle='--', color=cmap(0.10), label='optimal')
+        if day_range is None:
+            plot_idx = np.ones(len(days_), dtype=np.bool)
+        else:
+            plot_idx = np.logical_and(days_ >= day_range[0], days_ <= day_range[1])
+        self.ax.plot(days_[plot_idx], t_p_opt_[plot_idx], 
+                linestyle='--', color=self.cmap(0.10), label='optimal')
 
         # Plot settings
         handles, labels = self.ax.get_legend_handles_labels()

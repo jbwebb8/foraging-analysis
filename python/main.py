@@ -2,6 +2,7 @@ import argparse
 import json
 import sys, os
 from util import find_files, find_data, recursive_dict_search
+from analysis import get_lick_stats
 from session import FreeSession
 from plot import *
 
@@ -120,7 +121,7 @@ for mouse_id in mouse_ids:
     hr_opt[mouse_id] = []
 
     for sess, day in zip(sessions[mouse_id], days[mouse_id]):
-        print('Processing session %d... ' % day, end=' ')
+        print('Processing session %d...' % day, end=' ')
 
         try:
             hr_obs[mouse_id].append(sess.get_harvest_rate(metric='observed', per_patch=True))
