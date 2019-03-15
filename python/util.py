@@ -1,6 +1,18 @@
-import numpy as np
+# General utility packages
 import os
 import re
+import struct
+import time
+
+# Google Drive API
+import pickle
+import os.path
+from googleapiclient.discovery import build
+from google_auth_oauthlib.flow import InstalledAppFlow
+from google.auth.transport.requests import Request
+
+# Numerical
+import numpy as np
 
 ### General utility functions ###
 def _check_list(names):
@@ -68,6 +80,215 @@ def _recursive_list_search(l, old_val, new_val):
         return l
 
 ### File handling ###
+class GoogleDriveHandler:
+    # If modifying these scopes, delete the file token.pickle.
+    SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+
+    def __init__(self, cred_file='credentials.json'):
+        # Credentials placeholder
+        creds = None
+
+        # The file token.pickle stores the user's access and refresh tokens, and is
+        # created automatically when the authorization flow completes for the first
+        # time.
+        if os.path.exists('token.pickle'):
+            with open('token.pickle', 'rb') as token:
+                creds = pickle.load(token)
+                
+        # If there are no (valid) credentials available, let the user log in.
+        if not creds or not creds.valid:
+            # Grab credentials from JSON file
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                flow = InstalledAppFlow.from_client_secrets_file(
+                    cred_file, SCOPES)
+                creds = flow.run_local_server()
+            
+            # Save the credentials for the next run
+            with open('token.pickle', 'wb') as token:
+                pickle.dump(creds, token)
+
+        # Build service
+        self.service = build('drive', 'v3', credentials=creds)
+
+    def download(self, *, filename=None, file_id=None, byte_range=None):
+        # Get download url
+        if file_id is None:
+            file_id = self.get_file_id(filename)
+        fields = self.service.files().get(fileId=file_id, fields='webContentLink, size').execute()
+        download_url = fields['webContentLink']
+        size = int(fields['size'])
+        
+        # Get file content
+        if byte_range is None:
+            byte_range = [0, size-1]
+        header = {'Range': 'bytes=%d-%d' % (byte_range[0], byte_range[1])}
+        resp, content = self.service._http.request(download_url, headers=header)
+
+        return content
+
+    def get_file_id(self, filename):
+        results = self.service.files().list(q="name contains '%s'" % filename).execute()
+        return results['files']
+
+
+class RHDHeader:
+
+    def __init__(self, *, f=None, filepath=None):
+        # Load file if not provided
+        if f is None:
+            f = open(filepath, 'rb')
+            close_file = True
+        else:
+            close_file = False
+
+        # Intan header
+        self.header, = struct.unpack('I', f.read(4))
+        
+        # Version number
+        self.version_major, = struct.unpack('h', f.read(2))
+        self.version_minor, = struct.unpack('h', f.read(2))
+        
+        # Sample rate
+        self.f_s = int(struct.unpack('f', f.read(4))[0])
+
+        if close_file:
+            f.close()
+        else:
+            f.seek(0, 0) # reset pointer
+
+
+class MDAHeader:
+
+    def __init__(self, *, f=None, filepath=None):
+        # Load file if not provided
+        if f is None:
+            f = open(filepath, 'rb')
+            close_file = True
+        else:
+            close_file = False
+        
+        # Placeholder for header length
+        self.n_bytes_header = 0
+
+        # First 32 bits: signed integer indicating data type
+        self.dtype_code, = struct.unpack('i', f.read(4))
+        self.n_bytes_header += 4
+
+        # Second 32 bits: number of bytes per entry
+        self.n_bytes_entry, = struct.unpack('i', f.read(4))
+        self.n_bytes_header += 4
+
+        # Third 32 bits: number of dimensions
+        self.n_dims, = struct.unpack('i', f.read(4))
+        self.n_bytes_header += 4
+
+        # Next 32*n_dims bits: size of each dimension
+        self.shape = np.zeros(self.n_dims, dtype=np.int64)
+        for i in range(self.n_dims):
+            self.shape[i], = struct.unpack('i', f.read(4))
+            self.n_bytes_header += 4
+
+        # Determine data type from code
+        if self.dtype_code == -3: # float32
+            #self.n_bytes_entry = 4
+            self.dtype_char = 'f'
+            self.dtype_np = np.float32
+        elif self.dtype_code == -4: # int16
+            #self.n_bytes_entry = 2
+            self.dtype_char = 'h'
+            self.dtype_np = np.int16
+        elif self.dtype_code == -5: # int32
+            #self.n_bytes_entry = 4
+            self.dtype_char = 'i'
+            self.dtype_np = np.int32
+        elif self.dtype_code == -6: # uint16
+            #self.n_bytes_entry = 2
+            self.dtype_char = 'H'
+            self.dtype_np = np.uint16
+        elif self.dtype_code == -7: # double
+            #self.n_bytes_entry = 8
+            self.dtype_char = 'd'
+            self.dtype_np = np.float64
+        elif self.dtype_code == -8: # uint32
+            #self.n_bytes_entry = 4
+            self.dtype_char = 'I'
+            self.dtype_np = np.uint32
+        else:
+            raise ValueError('Unknown code (%d).' % code)
+        
+        if close_file:
+            f.close()
+        else:
+            f.seek(0, 0) # reset pointer
+
+
+class MDAReader:
+
+    def __init__(self, filepath, drive_file=False, service=None):
+        """
+        Reads MDA files generated by MountainSort software. Assumes data shape is
+        [num_channels, num_samples].
+
+        Args:
+        - filepath: If drive_file=False, local location of file. If drive_file=True,
+                    file_id of file.
+        - drive_file: True if providing Google Drive file (and service via API).
+        - service: Google Drive API service if using Google Drive file.
+        """
+        if drive_file:
+        self.f = open(filepath, 'rb')
+        self.header = MDAHeader(f=self.f)# Shape values
+        self.num_channels = self.header.shape[0]
+        self.N = self.header.shape[1]
+
+    def read(self, *, 
+             ch_start=None, 
+             ch_end=None, 
+             sample_start=None, 
+             sample_end=None,
+             io_attempts=5):
+        # Default indices (0-indexed)
+        if ch_start == None:
+            ch_start = 0
+        if ch_end == None:
+            ch_end = self.num_channels - 1
+        if sample_start == None:
+            sample_start = 0
+        if sample_end == None:
+            sample_end = self.N - 1
+        
+        # Set pointer to first byte of slice
+        byte_start = self.header.n_bytes_header + (self.header.n_bytes_entry * self.num_channels * sample_start)
+        self.f.seek(byte_start, 0)
+        
+        # Get specified entries
+        # For efficiency, just read all channels, and then slice at end
+        num_samples = sample_end - sample_start
+        num_pts = self.num_channels * num_samples
+        format_str = '%d%s' % (num_pts, self.header.dtype_char)
+        b = None # binary placeholder
+        for _ in range(io_attempts):
+            # Reading from streamed and/or large file can occasionally throw errors.
+            # Sometimes, this is resolved by subsequent calls.
+            try:
+                b = self.f.read(self.header.n_bytes_entry*num_pts)
+                break
+            except IOError:
+                print('IOError: Retrying in one second...')
+                time.sleep(1)
+                self.f.seek(byte_start, 0) # reset pointer just in case
+        
+        # Convert to numpy array if successful
+        if b is not None:
+            X = np.array(struct.unpack(format_str, b))
+        else:
+            raise IOError('Error reading file.')
+        #X = np.fromfile(self.f, dtype=self.header.dtype_np, count=num_pts)
+
+        return X.reshape([self.num_channels, num_samples], order='F')[ch_start:ch_end+1, :]
+
 def find_files(path, files):
     """Recursive algorithm for finding files"""
     # If path is file, then append to list
@@ -176,6 +397,8 @@ def flatten_list(a, ids=None):
             else:
                 a_flat[j] = np.asarray(a_i)
                 if isinstance(idx, list) or isinstance(idx, np.ndarray):
+                    print(j)
+                    print(idx)
                     ids_flat[j] = np.asarray(idx)
                 else:
                     ids_flat[j] = idx

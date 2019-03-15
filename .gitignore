@@ -5,6 +5,7 @@ matlab/*.m~
 # jupyter notebook
 python/.ipynb_checkpoints/*
 notebooks/.ipynb_checkpoints/*
+notebooks/credentials.json
 
 # vs code
 .vscode/*
