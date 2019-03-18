@@ -3,6 +3,8 @@ import os
 import re
 import struct
 import time
+from tempfile import TemporaryFile
+import json
 
 # Google Drive API
 import pickle
@@ -80,9 +82,12 @@ def _recursive_list_search(l, old_val, new_val):
         return l
 
 ### File handling ###
-class GoogleDriveHandler:
+class GoogleDriveService:
     # If modifying these scopes, delete the file token.pickle.
     SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+
+    # download_url = base_url + file_id + '?alt=media'
+    BASE_URL = 'https://www.googleapis.com/drive/v3/files/' # base download url
 
     def __init__(self, cred_file='credentials.json'):
         # Credentials placeholder
@@ -101,8 +106,14 @@ class GoogleDriveHandler:
             if creds and creds.expired and creds.refresh_token:
                 creds.refresh(Request())
             else:
+                # Check for credentials file
+                if not os.path.exists(cred_file):
+                    raise SyntaxError('Credentials file %s does not exist. Follow '
+                                      'instructions for downloading file at Google '
+                                      'Drive API website, and place in current directory.'
+                                      % cred_file)
                 flow = InstalledAppFlow.from_client_secrets_file(
-                    cred_file, SCOPES)
+                    cred_file, self.SCOPES)
                 creds = flow.run_local_server()
             
             # Save the credentials for the next run
@@ -110,27 +121,87 @@ class GoogleDriveHandler:
                 pickle.dump(creds, token)
 
         # Build service
-        self.service = build('drive', 'v3', credentials=creds)
+        self._service = build('drive', 'v3', credentials=creds)
 
-    def download(self, *, filename=None, file_id=None, byte_range=None):
+    def download(self, *, 
+                 filename=None, 
+                 file_id=None, 
+                 byte_range=None,
+                 chunk_size=100*1024*1024, # from Google API
+                 file_object=None):
         # Get download url
         if file_id is None:
             file_id = self.get_file_id(filename)
-        fields = self.service.files().get(fileId=file_id, fields='webContentLink, size').execute()
-        download_url = fields['webContentLink']
+        fields = self._service.files().get(fileId=file_id, fields='webContentLink, size').execute()
         size = int(fields['size'])
+        #download_url = fields['webContentLink'] # doesn't work
+        download_url = self.BASE_URL + file_id + '?alt=media'
+        #download_url = self._service.files().get_media(fileId=file_id).uri # also works
         
-        # Get file content
+        # Set range of bytes to download
         if byte_range is None:
             byte_range = [0, size-1]
-        header = {'Range': 'bytes=%d-%d' % (byte_range[0], byte_range[1])}
-        resp, content = self.service._http.request(download_url, headers=header)
-
-        return content
+        
+        # Download and return all bytes at once if no file object provided
+        if file_object is None:
+            
+            header = {'Range': 'bytes=%d-%d' % (byte_range[0], byte_range[1])}
+            resp, content = self._service._http.request(download_url, headers=header)
+            
+            return content
+        
+        # Otherwise, write chunks to file object until all bytes downloaded
+        else:
+            pointer = byte_range[0]
+            while pointer < byte_range[1]:
+                header = {'Range': 'bytes=%d-%d' % (pointer, min(pointer + chunk_size - 1, size - 1))}
+                resp, content = self._service._http.request(download_url, headers=header)
+                file_object.write(content)
+                pointer += chunk_size
+            
+            return True
 
     def get_file_id(self, filename):
-        results = self.service.files().list(q="name contains '%s'" % filename).execute()
-        return results['files']
+        files = self._service.files().list(q="name contains '%s'" % filename).execute()['files']
+        
+        if len(files) == 0:
+            raise SyntaxError('No files matching \'%s\'.' % filename)
+        elif len(files) > 1:
+            raise SyntaxError('Multiple files matching \'%s\'. Please specify.' % filename)
+        else:
+            return files[0]['id']
+
+
+class GoogleDriveFile:
+
+    def __init__(self, service, filename):
+        # Set global attributes
+        self._service = service # GoogleDriveService object
+        self.filename = filename
+        self.file_id = self._service.get_file_id(filename)
+
+        # Set initial parameters
+        self.pointer = 0 # pointer to current byte
+
+    def seek(self, idx, code):
+        """Wrapper for Python file.seek"""
+        if code == 0:
+            self.pointer = idx
+        else:
+            raise ValueError('Unknown code %d.' % code)
+
+        return self.pointer
+
+    def read(self, num_bytes):
+        """Wrapper for Python file.read"""
+        chunk = self._service.download(file_id=self.file_id, 
+                                       byte_range=[self.pointer, self.pointer+num_bytes-1])
+        self.pointer += num_bytes
+
+        return chunk
+
+    def close(self):
+        self.pointer = 0
 
 
 class RHDHeader:
@@ -226,20 +297,18 @@ class MDAHeader:
 
 class MDAReader:
 
-    def __init__(self, filepath, drive_file=False, service=None):
+    def __init__(self, file_object):
         """
         Reads MDA files generated by MountainSort software. Assumes data shape is
         [num_channels, num_samples].
 
         Args:
-        - filepath: If drive_file=False, local location of file. If drive_file=True,
-                    file_id of file.
-        - drive_file: True if providing Google Drive file (and service via API).
-        - service: Google Drive API service if using Google Drive file.
+        - file_object: Python file-object in read-binary mode; must have seek() 
+                       and read() methods (e.g. from built-in function 
+                       open(filename, 'rb'))
         """
-        if drive_file:
-        self.f = open(filepath, 'rb')
-        self.header = MDAHeader(f=self.f)# Shape values
+        self.f = file_object
+        self.header = MDAHeader(f=self.f) # Shape values
         self.num_channels = self.header.shape[0]
         self.N = self.header.shape[1]
 
@@ -288,6 +357,33 @@ class MDAReader:
         #X = np.fromfile(self.f, dtype=self.header.dtype_np, count=num_pts)
 
         return X.reshape([self.num_channels, num_samples], order='F')[ch_start:ch_end+1, :]
+
+def bytes_to_object(chunk, ob_type='numpy'):
+    """Loads bytes into specified object by creating temporary file.
+    
+    Args:
+    - chunk: chunk of binary data to load
+    - ob_type: type of object to create
+        - numpy: numpy array
+        - json: JSON file
+    """
+    # Load temporary file-like object
+    temp = TemporaryFile()
+    temp.write(chunk)
+    temp.seek(0, 0)
+
+    # Create object
+    if ob_type == 'numpy':
+        obj = np.load(temp)
+    elif ob_type == 'json':
+        obj = json.load(temp)
+    else:
+        raise SyntaxError('Unknown object type \'%s\'.' % ob_type)
+
+    # Close temporary file
+    temp.close()
+
+    return obj
 
 def find_files(path, files):
     """Recursive algorithm for finding files"""
