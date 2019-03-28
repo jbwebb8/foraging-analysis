@@ -1,6 +1,7 @@
 import numpy as np
 from scipy import signal
 from scipy.optimize import broyden1
+from scipy.optimize.nonlin import NoConvergence
 import warnings
 
 ### Waveform analysis ###
@@ -103,10 +104,22 @@ def _to_array(a, max_len=None):
     else: # assume single number
         return np.asarray([a]) * np.ones([max_len])
 
+def _solve_mvt_equation(*, F_log, F_exp, x_init, max_iter=10000):
+    try:
+        return broyden1(F_log, x_init, maxiter=max_iter) # positive solution
+    except (NoConvergence, RuntimeWarning):
+        print('Logarithmic function failed. Attempting to solve exponential function...')
+        return broyden1(F_exp, x_init) # positive solution
+
 def cumulative_reward(t_p, R_0, r_0, tau):
     return r_0 * tau * (1.0 - np.exp(-t_p / tau)) + R_0
     
-def get_optimal_values(*, t_p=None, t_t=None, R_0=None, r_0=None, tau=None):
+def get_optimal_values(*, t_p=None, 
+                       t_t=None, 
+                       R_0=None, 
+                       r_0=None, 
+                       tau=None,
+                       return_solvable=False):
     """
     Returns optimal value based on the marginal value theorem, based on values
     of other parameters.
@@ -117,11 +130,15 @@ def get_optimal_values(*, t_p=None, t_t=None, R_0=None, r_0=None, tau=None):
     - R_0: Initial reward volume.
     - r_0: Initial reward rate.
     - tau: Decay constant.
+    - return_solvable: If True, return array of whether each point is solvable.
 
     Returns:
     - opt: Optimal value of unknown parameter.
-    - r_opt: Amount of cumulative reward at optimal leaving time.
+    - R_opt: Amount of cumulative reward at optimal leaving time.
+    - is_solvable: Array where True means data point has solution.
     """
+
+    warnings.filterwarnings('default')
 
     # Assert one unknown
     loc = [t_p, t_t, R_0, r_0, tau]
@@ -138,17 +155,30 @@ def get_optimal_values(*, t_p=None, t_t=None, R_0=None, r_0=None, tau=None):
                                  for kwarg in loc]
 
     # Minimum travel time: R_0 / r_0
+    is_solvable = np.ones(max_len, dtype=np.bool)
     if (t_t is not None) and (R_0 is not None) and (r_0 is not None):
         if np.sum(t_t < (R_0 / r_0)) > 0:
             warnings.warn('Some data points exceed minimum travel time. R_0 set to zero.')
-            R_0[t_t < (R_0 / r_0)] = 0.0
+            idx = t_t < (R_0 / r_0)
+            R_0[idx] = 0.0
+            is_solvable[idx] = False
     
     # Solve equation based on unknown
     if t_p is None:
-        # Solve non-linear equation for residence time
-        F = lambda x: (r_0 * np.exp(-x/tau) * (t_t + x + tau)) - (r_0 * tau) - R_0
-        #t_p = scipy.optimize.broyden1(F, -100) # negative solution
-        t_p = broyden1(F, 10*tau) # positive solution
+        # Solve non-linear equation for residence time (logarithmic form more numerically stable)
+        warnings.filterwarnings('error')
+        try:
+            F_log = lambda x: (np.log(r_0) - (x / tau) + np.log(t_t + x + tau) - np.log((r_0 * tau) + R_0))
+            F_exp = lambda x: (r_0 * np.exp(-x/tau) * (t_t + x + tau)) - (r_0 * tau) - R_0
+            t_p = _solve_mvt_equation(F_log=F_log, F_exp=F_exp, x_init=tau)
+        except (NoConvergence, RuntimeWarning):
+            if max_len > 1: # multiple points
+                print('Vector solution failed. Attempting to solve individual data points...')
+                t_p = np.zeros(max_len)
+                for i, [t_t_, R_0_, r_0_, tau_] in enumerate(zip(t_t, R_0, r_0, tau)):
+                    F_log = lambda x: (np.log(r_0_) - (x / tau_) + np.log(t_t_ + x + tau_) - np.log((r_0_ * tau_) + R_0_))
+                    F_exp = lambda x: (r_0_ * np.nexp(-x/tau_) * (t_t_ + x + tau_)) - (r_0_ * tau_) - R_0_
+                    t_p[i] = _solve_mvt_equation(F_log=F_log, F_exp=F_exp, x_init=t_p[i])
         opt = t_p
     elif t_t is None:
         # Solve for travel time
@@ -165,17 +195,30 @@ def get_optimal_values(*, t_p=None, t_t=None, R_0=None, r_0=None, tau=None):
         r_0 = R_0 / (np.exp(-t_p/tau) * (t_t + t_p + tau) - tau)
         opt = r_0
     elif tau is None:
-        # Solve non-linear equation for decay rate
-        F = lambda x: (r_0 * np.exp(-t_p/x) * (t_t + t_p + x)) - (r_0 * x) - R_0
-        #tau = scipy.optimize.broyden1(F, -100) # negative solution
-        tau = broyden1(F, t_p) # positive solution
+        # Solve non-linear equation for decay rate (logarithmic form more numerically stable)
+        warnings.filterwarnings('error')
+        try:
+            F_log = lambda x: (np.log(r_0) - (t_p / x) + np.log(t_t + t_p + x) - np.log((r_0 * x) + R_0))
+            F_exp = lambda x: (r_0 * np.exp(-t_p/x) * (t_t + t_p + x)) - (r_0 * x) - R_0
+            tau = _solve_mvt_equation(F_log=F_log, F_exp=F_exp, x_init=t_p)
+        except (NoConvergence, RuntimeWarning):
+            if max_len > 1: # multiple points
+                print('Vector solution failed. Attempting to solve individual data points...')
+                tau = np.zeros(max_len)
+                for i, [t_p_, t_t_, R_0_, r_0_] in enumerate(zip(t_p, t_t, R_0, r_0)):
+                    F_log = lambda x: (np.log(r_0_) - (t_p_ / x) + np.log(t_t_ + t_p_ + x) - np.log((r_0_ * x) + R_0_))
+                    F_exp = lambda x: (r_0_ * np.exp(-t_p_/x) * (t_t_ + t_p_ + x)) - (r_0_ * x) - R_0_
+                    tau[i] = _solve_mvt_equation(F_log=F_log, F_exp=F_exp, x_init=t_p[i])
         opt = tau
     
     # Calculate total harvested reward for optimal residence time
-    r_opt = cumulative_reward(t_p, R_0, r_0, tau)
+    R_opt = cumulative_reward(t_p, R_0, r_0, tau)
     
     # Return number if only one value queried
-    if isinstance(opt, np.ndarray) and not isinstance(r_opt, np.ndarray):
+    if isinstance(opt, np.ndarray) and not isinstance(R_opt, np.ndarray):
         opt = float(opt)
     
-    return opt, r_opt
+    if return_solvable:
+        return opt, R_opt, is_solvable
+    else:
+        return opt, R_opt
