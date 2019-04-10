@@ -6,6 +6,7 @@ matlab/*.m~
 python/.ipynb_checkpoints/*
 notebooks/.ipynb_checkpoints/*
 notebooks/credentials.json
+notebooks/token.pickle
 
 # vs code
 .vscode/*
