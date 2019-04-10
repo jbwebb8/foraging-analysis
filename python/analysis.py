@@ -38,23 +38,28 @@ def get_lick_decisions(sess, min_interval=None):
     t_lick = sess.get_lick_times()
     dt_lick = np.diff(t_lick)
 
-    # Get histogram of inter-lick intervals <= 1.0 seconds
-    hist, bin_edges = np.histogram(dt_lick, range=[0.0, 1.0], bins=20)
-    bin_width = bin_edges[1] - bin_edges[0] # 50 ms
-    
-    # Find max peak associated with lick-bout
-    h_max = np.max(hist)
-    idx_max = np.argmax(hist)
+    if min_interval is None:
+        # Get histogram of inter-lick intervals <= 1.0 seconds
+        hist, bin_edges = np.histogram(dt_lick, range=[0.0, 1.0], bins=20)
+        bin_width = bin_edges[1] - bin_edges[0] # 50 ms
+        
+        # Find max peak associated with lick-bout
+        h_max = np.max(hist)
+        idx_max = np.argmax(hist)
 
-    # Set threshold as first bin significantly after peak
-    thresh = bin_edges[idx_max + 1] + 0.5*bin_width
-    for i in range(idx_max + 1, len(hist)):
-        if hist[i] < (0.1 * h_max):
-            thresh = bin_edges[i] + 0.5*bin_width
-            break
-    
+        # Set threshold as first bin significantly after peak
+        thresh = bin_edges[idx_max + 1] + 0.5*bin_width
+        for i in range(idx_max + 1, len(hist)):
+            if hist[i] < (0.1 * h_max):
+                thresh = bin_edges[i] + 0.5*bin_width
+                break
+        print('Found threshold of %.2f seconds.' % thresh)
+    else:
+        # Set threshold to specified interval
+        thresh = min_interval
+
     # Filter licks by time from previous lick
-    idx_decision = np.insert(np.diff(t_lick) > thresh, 0, 0)
+    idx_decision = np.insert(np.diff(t_lick) > thresh, 0, True)
     t_decision = t_lick[idx_decision]
 
     return t_decision

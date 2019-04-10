@@ -8,6 +8,8 @@ from util import in_interval, _check_list
 
 class Session:
 
+    WHEEL_CIRCUMFERENCE = 60 # cm
+
     def __init__(self, filename):
         # Get filename
         self.filename = filename
@@ -21,7 +23,7 @@ class Session:
             day = day[:match.span()[0]]
         self.day = int(day)
         self.data_names = ['sound', 'motor', 'lick', 'fs', 'wheel_speed', 
-                           'wheel_position', 'dt_patch']
+                           'wheel_time', 'wheel_position', 'dt_patch']
         self.var_names = ['t_patch', 'in_patch', 't_stop', 's_var',
                           'fs_s', 't_s', 't_motor', 'dt_motor', 't_lick']
         self.settings = {}
@@ -106,6 +108,8 @@ class Session:
             return self.f['UntitledWheelSpeed']['Data'][0, :] * 100 # cm/s
         elif name == 'wheel_time':
             return self.f['UntitledWheelTime']['Data'][0, :]
+        elif name == 'wheel_position':
+            return self.f['UntitledAngularPosition']['Data'][0, :] / 360 * self.WHEEL_CIRCUMFERENCE # cm
         elif name == 'dt_patch':
             return self.f['UntitledPatchTime']['Data'][0, :]
         else:
