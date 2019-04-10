@@ -2,6 +2,7 @@
 import json
 from time import time
 import numpy as np
+import math
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
 from util import _check_list, MDAReader
@@ -350,4 +351,161 @@ def curate_firings(*, firings,
     else:
         return firings_curated
         
+
+### Firing rate estimation ###
+def get_spike_counts(*,
+                     firings,
+                     t_firings,
+                     t_stimulus,
+                     dt_bin=0.020,
+                     t_window=[-1.0, 1.0],
+                     labels=None,
+                     metrics=None,
+                     verbose=True):
+    """
+    Returns number of spikes within time bins centered around time of stimuli.
+    Equivalent to a peri-stimulus time histogram (PSTH).
+
+    Args:
+    - firings (ndarray, [3, N]): Array of spike information from curated MDA file.
+    - t_firings (ndarray, [N]): Timestamps associated with each spike in firings.
+    - t_stimulus (ndarray, [T]): Timestamps associated with onset of stimulus.
+        Windows will be centered around these timestamps.
+    - dt_bin (float): Size of time bins in seconds in which to count spikes.
+    - t_window (list): Length of time window relative to t_stimulus in which
+        to count spikes (of form [t_min, t_max]).
+    - labels (ndarray, [M]): Cluster labels of units to be analyzed.
+    - metrics (dict): Loaded JSON cluster metrics file from MountainSort.
+    - verbose (bool): If True, print progress statements.
+
+    Returns:
+    - n_bins (ndarray, [M, T, num_bins]): Spike counts of M units across T stimuli
+        within num_bins time bins in specified window around stimulus.
+    - bins (ndarray, [num_bins+1]): Edges of time bins used to calculate spike counts relative to each
+        time in t_stimulus.
+    """
+    # Create time bins within stimulus window
+    bins = np.arange(t_window[0]/dt_bin, t_window[1]/dt_bin + dt_bin) * dt_bin
+    t_bins = t_stimulus[:, np.newaxis] + bins[np.newaxis, :]
+
     
+    # Get unit labels
+    if labels is None:
+        if metrics is not None:
+            labels = np.array([c['label'] for c in metrics['clusters']])
+        else:
+            raise SyntaxError('Unit labels or metrics JSON file must be provided.')
+    
+    # Placeholder for binned spike counts
+    # shape = [num_units, num_windows, bins]
+    n_bin = np.zeros([len(labels), len(t_stimulus), len(bins)-1])
+
+    # Iterate through units
+    for i, label in enumerate(labels):
+        if verbose:
+            print('Processing unit %d (%d of %d)...' % (label, i+1, len(labels)), end=' ')
+            t = time()
+
+        # Get spike times
+        t_firings_ = t_firings[firings[2, :] == label]
+
+        # Determine number of spikes in bins over all stimulus windows
+        in_bin = np.logical_and((t_firings_[np.newaxis, np.newaxis, :] >= t_bins[:, :-1, np.newaxis]), 
+                                (t_firings_[np.newaxis, np.newaxis, :] <  t_bins[:, 1:, np.newaxis]))
+        
+        # Get spike counts in bins over all stimulus windows
+        n_bin[i, :, :] = np.sum(in_bin.astype(np.int32), axis=-1) # sum over spikes
+
+        if verbose:
+            print('done. (%.3f seconds)' % (time() - t))
+    
+    return n_bin, bins
+
+
+def smooth_spike_counts(*,
+                        counts,
+                        dt_bin,
+                        method='kernel',
+                        axis=-1,
+                        **kwargs):
+    """
+    Provides continuous estimate of neural spike counts by smoothing histogram
+    of spike counts in time bins. This can then be converted into firing rates
+    by dividing the smoothed counts by dt_bin.
+
+    Args:
+    - counts (ndarray: Number of spikes in each time bin. Can be for single or
+        multiple neurons (see axis parameter).
+    - dt_bin (float): Size of time bins in seconds.
+    - method (str): Smoothing method to use. Possible options are:
+        - kernel: Apply kernel smoothing by convolving kernel with spike counts.
+    - axis (int): Axis on which to apply smoothing. This should represent
+        the axis containing the time bins (e.g. 2 if using get_spike_counts()).
+    
+    Returns:
+    - n_smooth: Smoothed spike counts after applying specified method.
+    """
+    if method == 'kernel':
+        return _kernel_smoothing(counts, dt_bin, axis=axis, **kwargs)
+    else:
+        raise SyntaxError('Unknown method \"%s\".' % method)
+
+
+def _kernel_smoothing(counts,
+                      dt_bin,
+                      axis=0,
+                      kernel=None,
+                      kernel_type='Gaussian',
+                      **kwargs):
+    
+    # Create kernel if not provided
+    if kernel is None:
+        kernel = _create_smoothing_kernel(kernel_type, dt_bin ,**kwargs)
+        
+    # Smooth counts by convolving with kernel
+    n_smooth = _convolve(counts, kernel, axis=axis)
+    
+    return n_smooth
+    
+
+def _create_smoothing_kernel(kernel_type, dt_bin, **kwargs):
+    if kernel_type == 'Gaussian':
+        sigma = kwargs.get('sigma', 0.100) # kernel width (ms)
+        sigma_k = sigma / dt_bin # kernel width (bins)
+        return lambda x: 1/(2*math.pi*sigma_k**2)**0.5 * np.exp(-0.5 * x**2 / sigma_k**2)
+    else:
+        raise SyntaxError('Unknown kernel type "%s".' % kernel_type)
+
+    
+def _convolve(x, k, axis=0):
+    if axis < 0:
+        axis = x.ndim + axis
+    a = axis
+    b = x.ndim - axis - 1
+    x_smooth = np.zeros(x.shape)
+    for i in range(x.shape[axis]):
+        slc = [slice(None)]*a + [i] + [slice(None)]*b
+        idx = np.arange(x.shape[axis]) - i # zero-center mean
+        k_i = k(idx)[[np.newaxis]*a + [slice(None)] + [np.newaxis]*b]
+        x_smooth[slc] = np.sum(k_i * x, axis=axis)
+    
+    return x_smooth
+
+
+def estimate_firing_rate(*,
+                         firings,
+                         t_firings,
+                         t_trial,
+                         t_window=[-1.0, 1.0],
+                         labels=None,
+                         metrics=None,
+                         method='kernel',
+                         **kwargs):
+    pass
+    
+
+    
+
+    
+
+     
