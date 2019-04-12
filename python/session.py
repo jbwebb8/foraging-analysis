@@ -2,11 +2,14 @@ import h5py
 import re
 import pickle
 import numpy as np
+from scipy.interpolate import interp1d
 from helper import smooth_waveform_variance, find_threshold, \
                    cumulative_reward, get_optimal_values, compare_patch_times
 from util import in_interval, _check_list
 
 class Session:
+
+    WHEEL_CIRCUMFERENCE = 60 # cm
 
     def __init__(self, filename):
         # Get filename
@@ -20,10 +23,11 @@ class Session:
         if match is not None:
             day = day[:match.span()[0]]
         self.day = int(day)
-        self.data_names = ['sound', 'motor', 'lick', 'fs', 'wheel_speed', 
-                           'wheel_position', 'dt_patch']
-        self.var_names = ['t_patch', 'in_patch', 't_stop', 's_var',
-                          'fs_s', 't_s', 't_motor', 'dt_motor', 't_lick']
+        self.data_names = ['sound', 'motor', 'lick', 'fs', 'wheel_time', 
+                           'wheel_speed', 'wheel_position', 'dt_patch']
+        self.var_names = ['T', 't_patch', 'in_patch', 't_stop', 's_var',
+                          'fs_s', 't_s', 't_motor', 'dt_motor', 't_lick',
+                          't_wheel', 'v_smooth']
         self.settings = {}
         struct = self.f['Settings']['Property']
 
@@ -109,6 +113,8 @@ class Session:
             return self.f['UntitledWheelSpeed']['Data'][0, :] * 100 # cm/s
         elif name == 'wheel_time':
             return self.f['UntitledWheelTime']['Data'][0, :]
+        elif name == 'wheel_position':
+            return self.f['UntitledAngularPosition']['Data'][0, :] / 360 * self.WHEEL_CIRCUMFERENCE # cm
         elif name == 'dt_patch':
             return self.f['UntitledPatchTime']['Data'][0, :]
         else:
@@ -136,7 +142,9 @@ class Session:
                 raise SyntaxError('Variable name \'%s\' not recognized.' % name)
 
     def _load_var(self, name):
-        if name in ['t_patch', 'in_patch', 't_stop']:
+        if name == 'T':
+            return self._get_total_time()
+        elif name in ['t_patch', 'in_patch', 't_stop']:
             return self._get_patch_times(name)
         elif name in ['s_var', 'fs_s', 't_s']:
             return self.preprocess_sound(name)
@@ -144,6 +152,12 @@ class Session:
             return self._get_motor_times(name)
         elif name == 't_lick':
             return self._get_lick_times()
+        elif name == 't_wheel':
+            return self._get_wheel_times()
+        elif name == 'v_smooth':
+            return self._get_smoothed_velocity()
+        else:
+            raise SyntaxError('Unknown variable name \'%s\'.' % name)
         
     def clear_vars(self, names=None):
         if names is not None:
@@ -160,6 +174,13 @@ class Session:
             self.load_vars(var_names)
         if self.vars.get('t_stop', 1.0) <= 0.0:
             raise UserWarning('Unanalyzable session: not enough patches.')
+
+    def _get_total_time(self):
+        # Requirements
+        req_data = ['fs']
+        self._check_attributes(data_names=req_data)
+
+        return self.f['UntitledSound' + chamber_number]['Total_Samples'][0, 0]/self.data['fs']
 
     def preprocess_sound(self, var_name):
         required_data = ['sound', 'fs']
@@ -286,6 +307,79 @@ class Session:
                 
         return t_patch, in_patch, t_stop
 
+    def _get_patches_from_wheel(self, stop_thresh=0.5, return_idx=False):
+        # Requirements
+        req_data = ['wheel_position', 'wheel_time']
+        req_vars = ['v_smooth']
+        self._check_attributes(data_names=req_data, var_names=req_vars)
+
+        # Load data
+        v_smooth = self.vars['v_smooth']
+        x_wheel = self.data['wheel_position']
+        t_wheel = self.data['wheel_time']
+
+        # Session parameters
+        v_run = self.settings['run_config']['v_leave']
+        v_stop = stop_thresh # threshold for stopping (cm/s)
+
+        # Initialize values
+        in_patch = True # task starts in a patch
+        x_start = 0.0 # linear position of current patch start
+        t_patch_wheel = [0.0] # patch entry/exit timestamps according to wheel data
+        idx_patch_wheel = [0] # indices of above timestamps
+        idx_in_patch = np.zeros(v_smooth.shape[0], dtype=np.bool)
+
+        # Iterate through wheel data
+        for i in range(v_smooth.shape[0]):
+            # Leave patch criteria:
+            # 1) in a patch
+            # 2) smoothed velocity exceeds threshold
+            if in_patch and v_smooth[i] > v_run:
+                in_patch = False
+                x_start = x_wheel[i]
+                t_patch_wheel.append(t_wheel[i])
+                idx_patch_wheel.append(i)
+            # Enter patch criteria:
+            # 1) not in a patch
+            # 2) smoothed velocity falls below threshold
+            # 3) have covered minimum interpatch distance
+            elif (not in_patch
+                and v_smooth[i] < v_stop
+                and x_wheel[i] - x_start > self.d_interpatch):
+                in_patch = True
+                t_patch_wheel.append(t_wheel[i])
+                idx_patch_wheel.append(i)
+            
+            # Update in_patch indices
+            idx_in_patch[i] = in_patch
+
+        # Drop last patch-interpatch sequence
+        t_patch_wheel = np.array(t_patch_wheel)
+        idx_patch_wheel = np.array(idx_patch_wheel)
+        if t_patch_wheel.shape[0] % 2 == 1: 
+            # End in patch: drop last patch entry
+            t_stop = t_patch_wheel[-1]
+            idx_stop = idx_patch_wheel[-1]
+            t_patch_wheel = t_patch_wheel[:-1]
+            idx_patch_wheel = idx_patch_wheel[:-1]
+        else: 
+            # End in interpatch: drop last patch entry and exit
+            t_stop = t_patch_wheel[-2]
+            idx_stop = idx_patch_wheel[-2]
+            t_patch_wheel = t_patch_wheel[:-2]
+            idx_patch_wheel = idx_patch_wheel[:-2]
+
+        # Reshape
+        t_patch_wheel = t_patch_wheel.reshape([-1, 2])
+        idx_patch_wheel = idx_patch_wheel.reshape([-1, 2])
+
+        if return_idx:
+            return t_patch_wheel, idx_patch_wheel, idx_in_patch, \
+                t_stop, idx_stop
+        else:
+            return t_patch_wheel, idx_in_patch, t_stop
+        
+
     def get_patch_durations(self):
         # Requirements
         req_vars = ['t_patch']
@@ -356,6 +450,68 @@ class Session:
         t_lick = idx_lick / self.data['fs']
 
         return t_lick
+
+    def get_wheel_times(self):
+        # Requirements
+        req_vars = ['t_wheel']
+        self._check_attributes(var_names=req_vars)
+
+        return self.vars['t_wheel']
+
+    def _get_wheel_times(self):
+        # Requirements
+        req_data = ['wheel_time']
+        req_vars = ['t_patch', 't_stop']
+        self._check_attributes(data_names=req_data, var_names=req_vars)
+
+        # Get patch entry/exit timestamps from sound
+        t_patch_sound = self.vars['t_patch']
+
+        # Get patch entry/exit timestamps from wheel
+        t_patch_wheel, idx_patch_wheel, _, t_stop, idx_stop = \
+            self._get_patches_from_wheel(return_idx=True)
+        t_wheel = self.data['wheel_time']
+
+        # Load last analyzable timestamp for interpolation function
+        # (corresponds to last patch entry)
+        t_stop = self.vars['t_stop']
+
+        # Estimate offset between encoder and DAQ start based on
+        # first patch exit (first analyzable timestamp)
+        offset = t_patch_sound[0, 1] - t_patch_wheel[0, 1]
+
+        # Interpolate between patch entry/exit timestamps to create
+        # aligned wheel timestamps. Anchor wheel indices associated
+        # with patch entry/exit (based on smoothed velocity) to 
+        # corresponding timestamps based on sound. Handle special case
+        # of session start (first patch "entry") due to initial offset
+        # between DAQ and encoder.
+        x_interp = np.append(idx_patch_wheel.flatten(), idx_stop)
+        y_interp = np.append(np.insert(t_patch_sound.flatten()[1:], 0, offset), t_stop)
+        f = interp1d(x_interp, y_interp)
+        t_wheel_ = np.zeros(t_wheel.shape)
+        t_wheel_[:idx_stop+1] = f(np.arange(idx_stop+1))
+
+        # Assign times after last patch entry (t_stop) based
+        # on original wheel timestamps
+        t_wheel_[idx_stop+1:] = t_wheel_[idx_stop] + (t_wheel[idx_stop+1:] - t_wheel_[idx_stop])
+
+        return t_wheel_
+
+    def _get_smoothed_velocity(self, dt=1.0, fs=200.0):
+        # Requirements
+        req_data = ['wheel_speed']
+        self._check_attributes(data_names=req_data)
+
+        # Create smoothed velocity trace
+        num_smooth = dt * fs # number of previous samples to include for smoothing
+        v_wheel = self.data['wheel_speed']
+        v_smooth = np.zeros(v_wheel.shape)
+        for i in range(v_wheel.shape[0]):
+            i_last = int(max(0, i - num_smooth + 1))
+            v_smooth[i] = np.mean(v_wheel[i_last:i+1])
+        
+        return v_smooth
 
     def get_harvest_rate(self, metric='observed', **kwargs):
         if metric == 'observed':
@@ -528,8 +684,8 @@ class FreeSession(Session):
         #    self._ASCII_to_float(struct[s + 'ThresholduL'])
         self.settings['run_config']['end_target_trial'] = \
             self._ASCII_to_bool(struct[s + 'Endtargettrial'])
-        self.settings['run_config']['v_low'] = \
-            self._ASCII_to_bool(struct[s + 'VThresholdms'])
+        self.settings['run_config']['v_leave'] = \
+            self._ASCII_to_float(struct[s + 'VThresholdms']) * 100 # cm/s
         self.settings['run_config']['end_patch_speed'] = \
             self._ASCII_to_bool(struct[s + 'Endpatchspeed'])
     
@@ -651,7 +807,7 @@ class TrialSession(Session):
                 self._ASCII_to_bool(struct[s + 'Endtargettrial'])
             self.settings['run_config']['end_target_reward'] = \
                 self._ASCII_to_bool(struct[s + 'Endtargetreward'])
-            self.settings['run_config']['v_low'] = \
-                self._ASCII_to_bool(struct[s + 'VThresholdms'])
+            self.settings['run_config']['v_leave'] = \
+                self._ASCII_to_float(struct[s + 'VThresholdms'])
             self.settings['run_config']['end_patch_speed'] = \
                 self._ASCII_to_bool(struct[s + 'Endpatchspeed'])
