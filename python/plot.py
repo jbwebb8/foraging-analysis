@@ -222,6 +222,7 @@ class Plotter:
                   err=None,
                   labels=None,
                   metrics=None,
+                  new_fig=True,
                   **kwargs):
         
         if metrics is not None:
@@ -241,7 +242,8 @@ class Plotter:
         t = bins[:-1] + 0.5*dt_bin
         cols = 5
         rows = (len(labels) // cols) + (len(labels) % cols > 0)
-        self.create_new_figure(figsize=(15, 3*rows), rows=rows, cols=cols)
+        if new_fig:
+            self.create_new_figure(figsize=(15, 3*rows), rows=rows, cols=cols)
         
         for i, label in enumerate(labels):
             #print('Processing label %d (%d of %d)...' % (label, i+1, len(labels)))

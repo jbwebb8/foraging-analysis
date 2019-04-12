@@ -484,9 +484,9 @@ def _convolve(x, k, axis=0):
     b = x.ndim - axis - 1
     x_smooth = np.zeros(x.shape)
     for i in range(x.shape[axis]):
-        slc = [slice(None)]*a + [i] + [slice(None)]*b
+        slc = tuple([slice(None)]*a + [i] + [slice(None)]*b)
         idx = np.arange(x.shape[axis]) - i # zero-center mean
-        k_i = k(idx)[[np.newaxis]*a + [slice(None)] + [np.newaxis]*b]
+        k_i = k(idx)[tuple([np.newaxis]*a + [slice(None)] + [np.newaxis]*b)]
         x_smooth[slc] = np.sum(k_i * x, axis=axis)
     
     return x_smooth
