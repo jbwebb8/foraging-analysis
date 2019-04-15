@@ -81,6 +81,12 @@ def _recursive_list_search(l, old_val, new_val):
             l = new_val
         return l
 
+def format_elapsed_time(dt):
+    h = dt // 3600
+    m = (dt - (3600*h)) // 60
+    s = dt - (3600*h) - (60*m)
+    return h, m, s
+
 ### File handling ###
 class GoogleDriveService:
     # If modifying these scopes, delete the file token.pickle.

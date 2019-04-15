@@ -1,15 +1,213 @@
 ### Functions for future ephys-analysis repo ###
 import json
-from time import time
+import time
 import numpy as np
 import math
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
-from util import _check_list, MDAReader
+from util import _check_list, MDAReader, format_elapsed_time
 from mountainlab_pytools.mdaio import writemda64
-
+from mountainlab_pytools import mlproc as mlp
 
 ### MountainSort functions ###
+DEFAULT_SORT_PARAMS = {
+    'processor_names': ['all'],
+    'output_dir': './',
+    'geom_filepath': '',
+    'sample_rate': 30000,
+    'freq_min': 300,
+    'freq_max': 6000,
+    'adjacency_radius': -1,
+    'detect_sign': -1,
+    'detect_threshold': 4,
+    'bursting_parents': True,
+    'clip_size': 100,
+    'refrac_msec': 1.0,
+    'firing_rate_thresh': 0.1,
+    'isolation_thresh': 0.95,
+    'noise_overlap_thresh': 0.03,
+    'peak_snr_thresh': 1.5,
+    'opts': {}
+}
+# Note: mlp.addProcess takes parameters of the form
+# (processor_name, input_dict, output_dict, params_dict, opts_dict)
+def sort_spikes(*,
+                timeseries,
+                config=None,
+                **kwargs):
+    # Inital time for calculating elapsed time
+    t_start = time.time()
+
+    # Load sort parameters
+    print('Loading parameters...', end=' ')
+    if config is not None:
+        if isinstance(config, str): # JSON filename
+            with open(config, 'r') as f:
+                user_params = json.loads(f.read())
+        elif isinstance(config, dict):
+            user_params = config
+    else:
+        user_params = kwargs
+    
+    params = {}
+    for k, v in DEFAULT_SORT_PARAMS.items():
+        if k in user_params.keys():
+            params[k] = user_params[k]
+        else:
+            params[k] = DEFAULT_SORT_PARAMS[k]
+    print('done.')
+
+    # File settings
+    output_dir = params['output_dir']
+    base_fn = timeseries[timeseries.rfind('/')+1:timeseries.find('.mda')]
+    base_fp = output_dir + base_fn
+    
+    ### Create jobs ###
+    all_jobs = ('all' in params['processor_names'])
+
+    # Bandpass filter
+    processor_name = 'ephys.bandpass_filter'
+    if processor_name in params['processor_names'] or all_jobs:
+        mlp.addProcess(processor_name,
+                    {'timeseries': timeseries},
+                    {'timeseries_out': base_fp + '_filt.mda'},
+                    {'samplerate': params['sample_rate'],
+                        'freq_min': params['freq_min'],
+                        'freq_max': params['freq_max']},
+                    params['opts'])
+
+    # Whiten
+    processor_name = 'ephys.whiten'
+    if processor_name in params['processor_names'] or all_jobs:
+        mlp.addProcess(processor_name,
+                    {'timeseries': base_fp + '_filt.mda'},
+                    {'timeseries_out': base_fp + '_whitened.mda'},
+                    {},
+                    params['opts'])
+
+    # Sort
+    processor_name = 'ms4alg.sort'
+    if processor_name in params['processor_names'] or all_jobs:
+        mlp.addProcess(processor_name,
+                    {'timeseries': base_fp + '_whitened.mda',
+                        'geom': params['geom_filepath']},
+                    {'firings_out': output_dir + 'firings.mda'},
+                    {'adjacency_radius': params['adjacency_radius'],
+                        'detect_sign': params['detect_sign'],
+                        'detect_threshold': params['detect_threshold']},
+                    params['opts'])
+    
+    # Calculate cluster metrics
+    processor_name = 'ms3.cluster_metrics'
+    if processor_name in params['processor_names'] or all_jobs:
+        mlp.addProcess('ms3.cluster_metrics',
+                    {'firings': output_dir + 'firings.mda',
+                        'timeseries': base_fp + '_whitened.mda'},
+                    {'cluster_metrics_out': output_dir + 'cluster_metrics_ms3.json'},
+                    {'samplerate': params['sample_rate']},
+                    params['opts'])
+
+    processor_name = 'ms3.isolation_metrics'
+    if processor_name in params['processor_names'] or all_jobs:
+        mlp.addProcess(processor_name,
+                    {'firings': output_dir + 'firings.mda',
+                        'timeseries': base_fp + '_whitened.mda'},
+                    {'metrics_out': output_dir + 'isolation_metrics.json',
+                        'pair_metrics_out': output_dir + 'pair_metrics.json'},
+                    {'compute_bursting_parents': params['bursting_parents']},
+                    params['opts'])
+
+    processor_name = 'ephys.compute_cluster_metrics'
+    if processor_name in params['processor_names'] or all_jobs:
+        mlp.addProcess(processor_name,
+                    {'firings': output_dir + 'firings.mda',
+                        'timeseries': base_fp + '_whitened.mda'},
+                    {'metrics_out': output_dir + 'cluster_metrics_ms4.json'},
+                    {'samplerate': params['sample_rate'],
+                        'clip_size': params['clip_size'],
+                        'refrac_msec': params['refrac_msec']},
+                    params['opts'])
+
+    processor_name = 'ms3.combine_cluster_metrics'
+    if processor_name in params['processor_names'] or all_jobs:
+        mlp.addProcess(processor_name,
+                    {'metrics_list': [output_dir + 'cluster_metrics_ms3.json', 
+                                      output_dir + 'isolation_metrics.json',
+                                      output_dir + 'cluster_metrics_ms4.json']},
+                    {'metrics_out': output_dir + 'metrics.json'},
+                    {},
+                    params['opts'])
+
+    # Add curation tags (but don't reject)
+    processor_name = 'pyms.add_curation_tags'
+    if processor_name in params['processor_names'] or all_jobs:
+        mlp.addProcess(processor_name,
+                    {'metrics': output_dir + 'metrics.json'},
+                    {'metrics_tagged': output_dir + 'metrics_tagged.json'},
+                    {'firing_rate_thresh': params['firing_rate_thresh'],
+                        'isolation_thresh': params['isolation_thresh'],
+                        'noise_overlap_thresh': params['noise_overlap_thresh'],
+                        'peak_snr_thresh': params['peak_snr_thresh']},
+                    params['opts'])
+
+def track_pipeline_progress(mlclient):
+    ### Track progress ###
+    t_start = time.time()
+    job_times = {}
+    status_old = _get_sort_status(mlclient)
+    print(status_old)
+    while len(status_old['pending']) + len(status_old['running']) > 0:
+        # Check for changes in job status
+        status_new = _get_sort_status(mlclient)
+        updates = _get_sort_progress(status_old, status_new)
+        print(status_old)
+        print(status_new)
+
+        # Print updates (if any)
+        for name in updates['start']:
+            print('Started %s...' % name)
+            job_times[name] = [time.time()]
+        for name in updates['finish']:
+            t_1 = job_times[name][0]
+            t_2 = time.time()
+            job_times[name].append(t_2)
+            h, m, s = format_elapsed_time(t_2 - t_1)
+            print('Finished %s (time: %02d:%02d:%02.2f)' % (name, h, m, s))
+
+        # Update current job statuses
+        status_old = status_new
+        time.sleep(1)
+    
+    # Print total elapsed time
+    h, m, s = format_elapsed_time(time.time() - t_start)
+    print('Finished script. (total time: %02d:%02d:%02d)' % (h, m, round(s)))
+
+def _get_sort_status(mlclient):
+    d = {'pending': [],
+         'running': [],
+         'finished': []}
+    for job_id, job in mlclient._jobs.items():
+        if job['status'] == 'pending':
+            d['pending'].append(job['processor_name'])
+        elif job['status'] == 'running':
+            d['running'].append(job['processor_name'])
+        elif job['status'] == 'finished':
+            d['finished'].append(job['processor_name'])
+    
+    return d
+
+def _get_sort_progress(status_old, status_new):
+    d = {'start': [],
+         'finish': []}
+    for job_name in status_old['pending']:
+        if job_name in status_new['running']:
+            d['start'].append(job_name)
+    for job_name in status_old['running']:
+        if job_name in status_new['finished']:
+            d['finish'].append(job_name)
+    
+    return d
+
 def create_merge_map(*, firings_old, firings_new, merge_map_out=None):
     """
     Maps cluster labels from before to after curation step to track merges.
@@ -122,7 +320,7 @@ def get_templates(*, timeseries,
     
     # Iterate through all units
     for i, label in enumerate(cluster_labels):
-        t = time()
+        t = time.time()
         print('Processing unit %d (%d of %d)...' % (label, i+1, len(cluster_labels)), end=' ')
         
         # Get spike sample indices
@@ -143,7 +341,7 @@ def get_templates(*, timeseries,
         # Get mean for each channel over all spikes
         wfs[i, :, :] /= count # memory-efficient form of getting mean
         
-        print('done. (%.3f seconds)' % (time() - t))
+        print('done. (%.3f seconds)' % (time.time() - t))
         
     # Convert to microvolts (see Intan data formats)
     wfs *= scale
@@ -404,7 +602,7 @@ def get_spike_counts(*,
     for i, label in enumerate(labels):
         if verbose:
             print('Processing unit %d (%d of %d)...' % (label, i+1, len(labels)), end=' ')
-            t = time()
+            t = time.time()
 
         # Get spike times
         t_firings_ = t_firings[firings[2, :] == label]
@@ -417,7 +615,7 @@ def get_spike_counts(*,
         n_bin[i, :, :] = np.sum(in_bin.astype(np.int32), axis=-1) # sum over spikes
 
         if verbose:
-            print('done. (%.3f seconds)' % (time() - t))
+            print('done. (%.3f seconds)' % (time.time() - t))
     
     return n_bin, bins
 
