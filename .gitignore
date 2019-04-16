@@ -1,0 +1,19 @@
+# matlab files
+matlab/*.asv
+matlab/*.m~
+
+# jupyter notebook
+python/.ipynb_checkpoints/*
+notebooks/.ipynb_checkpoints/*
+notebooks/credentials.json
+notebooks/token.pickle
+
+# vs code
+.vscode/*
+
+# compiled code
+*.pyc
+
+# config files
+config/*
+!config/template.json
