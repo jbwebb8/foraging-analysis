@@ -1,3 +1,4 @@
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import math
@@ -6,19 +7,21 @@ from util import get_patch_statistics, _check_list
 class Plotter:
 
     DEFAULT_SETTINGS = {'cmap': 'copper',
-                        'style': 'seaborn-deep'}
+                        'style': 'seaborn-deep',
+                        'rcParams': {}}
 
     def __init__(self, **kwargs):
         # Plot settings
         cmap = kwargs.get('cmap', self.DEFAULT_SETTINGS['cmap'])
         self.cmap = plt.get_cmap(cmap)
         self.style = kwargs.get('style', self.DEFAULT_SETTINGS['style'])
+        matplotlib.rcParams.update(kwargs.get('rcParams', self.DEFAULT_SETTINGS['rcParams']))
         # TODO: initiate pyplot settings
 
         # Initial figure
         self.fig = None
 
-    def create_new_figure(self, figsize=(10, 10), rows=1, cols=1):
+    def create_new_figure(self, figsize=(15, 15), rows=1, cols=1):
         # Clear old figure
         plt.close('all')
         
@@ -82,7 +85,8 @@ class Plotter:
                 plot_idx = get_plot_idx(days_)
                 self.ax.plot(days_[plot_idx], 
                              data_[plot_idx], 
-                             color=self.cmap((i+1)/n_mouse), 
+                             color=self.cmap((i+1)/n_mouse),
+                             marker='o',
                              label=mouse_id)
             if plot_points:
                 data_, days_ = get_patch_statistics(data[mouse_id], 
@@ -90,14 +94,19 @@ class Plotter:
                                                     method=center,
                                                     return_all=True)
                 plot_idx = get_plot_idx(days_)
-                (days_, data_) = (days_[plot_idx], data_[plot_idx])
-                for dt in np.unique(data_):
-                    idx = (data_ == dt)
-                    n = np.sum(idx)
-                    self.ax.scatter(days_[idx], 
-                                    data_[idx], 
-                                    color=self.cmap((i+1)/n_mouse),
-                                    label=mouse_id)
+                self.ax.scatter(days_[plot_idx], 
+                                data_[plot_idx], 
+                                color=self.cmap((i+1)/n_mouse),
+                                label=mouse_id)
+                # not sure what I was doing here...
+                #(days_, data_) = (days_[plot_idx], data_[plot_idx])
+                #for dt in np.unique(data_): 
+                #    idx = (data_ == dt)
+                #    n = np.sum(idx)
+                #    self.ax.scatter(days_[idx], 
+                #                    data_[idx], 
+                #                    color=self.cmap((i+1)/n_mouse),
+                #                    label=mouse_id)
             
         # Plot overall trace
         data_, days_ = get_patch_statistics(data, 
@@ -113,7 +122,8 @@ class Plotter:
         self.ax.errorbar(days_[plot_idx], 
                          data_[plot_idx], 
                          yerr=y_err[:, plot_idx], 
-                         color=self.cmap(c), 
+                         color=self.cmap(c),
+                         marker='o',
                          capsize=5,
                          label=label)
 
@@ -127,7 +137,6 @@ class Plotter:
         # Plot settings
         self.ax.set_xlabel('Session')
         self.ax.set_ylabel('Harvest Rate per Patch (uL/s)')
-        self.ax.set_xticks(np.arange(3, 20, 2))
         
     def plot_harvest_diffs(self,
                            days,

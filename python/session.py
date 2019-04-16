@@ -85,7 +85,10 @@ class Session:
         for name in names:
             if name in self.data_names:
                 if name not in self.data.keys():
-                    self.data[name] = self._load_data(name)
+                    try:
+                        self.data[name] = self._load_data(name)
+                    except KeyError:
+                        raise UserWarning('Data \'%s\' cannot be found.' % name)
             else:
                 raise Warning('Data name \'%s\' not recognized.' % name)
     
@@ -220,7 +223,7 @@ class Session:
             else:
                 raise ValueError('Name \'%s\' not recognized.' % var_name)
         else:
-            raise ValueError('Patch durations from sound and log file do not match.')
+            raise UserWarning('Patch durations from sound and log file do not match.')
 
     def _get_patches_from_sound(self, s, fs, thresh):
         # Determine data points in patch based on sound variance
@@ -414,7 +417,7 @@ class Session:
         thresh = 2.5 # half of 5V square wave
         is_pump = (motor > thresh).astype(np.int32)
         idx_pump_start = (np.argwhere((is_pump - np.roll(is_pump, -1)) == -1) + 1).flatten()
-        idx_pump_end = (np.argwhere((is_pump - np.roll(is_pump, -1)) == 1) + 1).flatten()
+        idx_pump_end = (np.argwhere((is_pump - np.roll(is_pump, -1)) == 1) + 1).flatten() 
         t_motor = idx_pump_start / self.data['fs']
         dt_motor = (idx_pump_end - idx_pump_start) / self.data['fs']
 
@@ -534,16 +537,32 @@ class Session:
                 / (np.max(self.vars['dt_motor']) - np.min(self.vars['dt_motor'])) )
             r_motor = lambda dt: m*dt - m*np.max(self.vars['dt_motor']) + np.max(r_log)
 
-            # Calculate observed reward per patch
+            # Just compare motor trace to logged reward volume
+            #r_log = self.data['reward'][self.data['reward'] > 0]
+            # TODO: correct for rewards logged after t_stop
+            #r_log = r_log[:self.vars['t_motor'].shape[0]]
+
+            # Find patches in which rewards given
             pad = 0.5 # padding in seconds
-            gt_t1 = self.vars['t_motor'][np.newaxis, :] > self.vars['t_patch'][:, 0, np.newaxis] - pad
-            lt_t2 = self.vars['t_motor'][np.newaxis, :] < self.vars['t_patch'][:, 1, np.newaxis] + pad
-            idx_patch = np.argwhere(np.logical_and(gt_t1, lt_t2))[:, 0]
+            #gt_t1 = self.vars['t_motor'][np.newaxis, :] > self.vars['t_patch'][:, 0, np.newaxis] - pad
+            #lt_t2 = self.vars['t_motor'][np.newaxis, :] < self.vars['t_patch'][:, 1, np.newaxis] + pad
+            #idx_patch = np.argwhere(np.logical_and(gt_t1, lt_t2))[:, 0]
+            idx_patch = in_interval(self.vars['t_motor'],
+                                    self.vars['t_patch'][:, 0],
+                                    self.vars['t_patch'][:, 1],
+                                    query='event')
+            if (idx_patch > 1).any():
+                raise UserWarning('Motor times cannot be uniquely assigned'
+                                  ' to individual patches.')
+            idx_patch = idx_patch.astype(np.bool)
+
+            # Calculate observed reward per patch
             r_patch_obs = np.zeros(self.vars['t_patch'].shape[0])
             for i in range(self.vars['t_patch'].shape[0]):
                 #r_patch_obs[i] = np.sum(self.vars['dt_motor'][idx_patch == i] * self.data['flow_rate'])
                 r_patch_obs[i] = np.sum(r_motor(self.vars['dt_motor'][idx_patch == i]))
-    
+                #r_patch_obs[i] = np.sum(r_log[idx_patch == i])
+
             # Divide reward per patch by segment time (patch + next interpatch)
             t_seg = self._get_segment_durations()
             hr_patch_obs = r_patch_obs / t_seg

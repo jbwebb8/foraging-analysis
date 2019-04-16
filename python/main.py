@@ -54,6 +54,14 @@ for mouse_id in mouse_ids:
     # Get filenames and training days
     filelist, training_days = find_data(mouse_id, files, exclude_strs=exclude_strs)
 
+    # Filter by global training range
+    if len(config['global'].get('day_range', [])) > 0:
+        day_range = config['global']['day_range']
+        keep_idx = np.logical_and(training_days >= day_range[0], 
+                                  training_days <= day_range[1])
+        filelist = [f for f, keep in zip(filelist, keep_idx) if keep]
+        training_days = training_days[keep_idx]
+
     # Check filelist
     print('Files to analyze (mouse %s):' % mouse_id)
     print('Day  Filename')
@@ -104,160 +112,169 @@ def save_sessions(mouse_id):
 plot_settings = config['plot_settings']
 plot = Plotter(**plot_settings)
 
+# Save config file for reference
+with open(results_dir + exp_name + '/config.json', 'w') as f:
+    json.dump(config, f)
 
 ####################### Harvest rate analysis #################################
-print('HARVEST RATE ANALYSIS')
+if config['harvest_rate']['analyze']:
+    print('HARVEST RATE ANALYSIS')
 
-# Grab harvest rate over sessions
-hr_obs = {} # observed rate
-hr_max = {} # maximum rate given leaving decisions
-hr_opt = {} # optimal rate (MVT) given environment
-for mouse_id in mouse_ids:
-    print('Analyzing mouse %s:' % mouse_id)
+    # Grab harvest rate over sessions
+    hr_obs = {} # observed rate
+    hr_max = {} # maximum rate given leaving decisions
+    hr_opt = {} # optimal rate (MVT) given environment
+    for mouse_id in mouse_ids:
+        print('Analyzing mouse %s:' % mouse_id)
 
-    # Placeholders
-    hr_obs[mouse_id] = []
-    hr_max[mouse_id] = []
-    hr_opt[mouse_id] = []
+        # Placeholders
+        hr_obs[mouse_id] = []
+        hr_max[mouse_id] = []
+        hr_opt[mouse_id] = []
 
-    for sess, day in zip(sessions[mouse_id], days[mouse_id]):
-        print('Processing session %d...' % day, end=' ')
+        for sess, day in zip(sessions[mouse_id], days[mouse_id]):
+            print('Processing session %d...' % day, end=' ')
 
-        try:
-            hr_obs[mouse_id].append(sess.get_harvest_rate(metric='observed', per_patch=True))
-            hr_max[mouse_id].append(sess.get_harvest_rate(metric='max', per_patch=True))
-            hr_opt[mouse_id].append(sess.get_harvest_rate(metric='optimal', per_patch=True))
-        except UserWarning: # unanalyzable session (e.g. not enough patches)
-            hr_obs[mouse_id].append(np.array([np.nan]))
-            hr_max[mouse_id].append(np.array([np.nan]))
-            hr_opt[mouse_id].append(np.array([np.nan]))
-        
-        # Clear data for memory management
-        sess.clear_data()
+            try:
+                hr_obs[mouse_id].append(sess.get_harvest_rate(metric='observed', per_patch=True))
+                hr_max[mouse_id].append(sess.get_harvest_rate(metric='max', per_patch=True))
+                hr_opt[mouse_id].append(sess.get_harvest_rate(metric='optimal', per_patch=True))
+            except UserWarning as w: # unanalyzable session (e.g. not enough patches)
+                print(w)
+                hr_obs[mouse_id].append(np.array([np.nan]))
+                hr_max[mouse_id].append(np.array([np.nan]))
+                hr_opt[mouse_id].append(np.array([np.nan]))
+            
+            # Clear data for memory management
+            sess.clear_data()
+            print('done.')
+
+        # Save updated session variables
+        if save_updates:
+            save_sessions(mouse_id)
+        print()     
+
+    # Plot individual learning curves
+    for mouse_id in mouse_ids:
+        print('Plotting harvest rate for mouse %s...' % mouse_id, end=' ')
+        plot.plot_harvest_rates(days[mouse_id], hr_obs[mouse_id], 
+                                **config['harvest_rate']['kwargs'])
+        plot.save_figure(results_dir + mouse_id + '/hr_vs_day.pdf')
+        plot.plot_harvest_diffs(days[mouse_id], hr_obs[mouse_id], hr_opt[mouse_id], 
+                                hr_max[mouse_id], **config['harvest_rate']['kwargs'])
+        plt.savefig(results_dir + mouse_id + '/hr_diff_vs_day.pdf')
         print('done.')
 
-    # Save updated session variables
-    if save_updates:
-        save_sessions(mouse_id)
-    print()     
-
-# Plot individual learning curves
-for mouse_id in mouse_ids:
-    print('Plotting harvest rate for mouse %s...' % mouse_id, end=' ')
-    plot.plot_harvest_rates(days[mouse_id], hr_obs[mouse_id], **config['harvest_rate'])
-    plot.save_figure(results_dir + mouse_id + '/hr_vs_day.pdf')
-    plot.plot_harvest_diffs(days[mouse_id], hr_obs[mouse_id], hr_opt[mouse_id], 
-                            hr_max[mouse_id], **config['harvest_rate'])
-    plt.savefig(results_dir + mouse_id + '/hr_diff_vs_day.pdf')
+    # Plot population learning curve
+    print('Plotting population learning curve...', end=' ')
+    plot.plot_harvest_rates(days, hr_obs, **config['harvest_rate']['kwargs'])
+    plot.save_figure(results_dir + exp_name + '/hr_vs_day.pdf')
+    plot.plot_harvest_diffs(days, hr_obs, hr_opt, hr_max, **config['harvest_rate']['kwargs'])
+    plt.savefig(results_dir + exp_name + '/hr_diff_vs_day.pdf')
     print('done.')
-
-# Plot population learning curve
-print('Plotting population learning curve...', end=' ')
-plot.plot_harvest_rates(days, hr_obs, **config['harvest_rate'])
-plot.save_figure(results_dir + exp_name + '/hr_vs_day.pdf')
-plot.plot_harvest_diffs(days, hr_obs, hr_opt, hr_max, **config['harvest_rate'])
-plt.savefig(results_dir + exp_name + '/hr_diff_vs_day.pdf')
-print('done.')
 
 
 ############################ MVT analysis #####################################
-print('MVT ANALYSIS')
+if config['mvt']['analyze']:
+    print('MVT ANALYSIS')
 
-# Grab patch residence and travel times
-t_p_obs = {}
-t_p_opt = {}
-t_t_obs = {}
-t_t_opt = {}
-for mouse_id in mouse_ids:
-    print('Analyzing mouse %s:' % mouse_id)
-    
-    # Placeholders
-    t_p_obs[mouse_id] = []
-    t_p_opt[mouse_id] = []
-    t_t_obs[mouse_id] = []
-    t_t_opt[mouse_id] = []
-    
-    for sess, day in zip(sessions[mouse_id], days[mouse_id]):
-        print('Processing session %d... ' % day, end=' ')
+    # Grab patch residence and travel times
+    t_p_obs = {}
+    t_p_opt = {}
+    t_t_obs = {}
+    t_t_opt = {}
+    for mouse_id in mouse_ids:
+        print('Analyzing mouse %s:' % mouse_id)
         
-        try:
-            t_p_obs[mouse_id].append(sess.get_patch_durations())
-            _, _, t_p_opt_, t_t_opt_ = sess.get_harvest_rate(metric='optimal', return_all=True)
-            t_p_opt[mouse_id].append(np.asarray([t_p_opt_]))
-            t_t_obs[mouse_id].append(sess.get_interpatch_durations())
-            t_t_opt[mouse_id].append(np.asarray([t_t_opt_]))
-        except UserWarning: # unanalyzable session
-            t_p_obs[mouse_id].append(np.asarray([np.nan]))
-            t_p_opt[mouse_id].append(np.asarray([np.nan]))
-            t_t_obs[mouse_id].append(np.asarray([np.nan]))
-            t_t_opt[mouse_id].append(np.asarray([np.nan]))
+        # Placeholders
+        t_p_obs[mouse_id] = []
+        t_p_opt[mouse_id] = []
+        t_t_obs[mouse_id] = []
+        t_t_opt[mouse_id] = []
+        
+        for sess, day in zip(sessions[mouse_id], days[mouse_id]):
+            print('Processing session %d... ' % day, end=' ')
+            
+            try:
+                t_p_obs[mouse_id].append(sess.get_patch_durations())
+                _, _, t_p_opt_, t_t_opt_ = sess.get_harvest_rate(metric='optimal', return_all=True)
+                t_p_opt[mouse_id].append(np.asarray([t_p_opt_]))
+                t_t_obs[mouse_id].append(sess.get_interpatch_durations())
+                t_t_opt[mouse_id].append(np.asarray([t_t_opt_]))
+            except UserWarning as w: # unanalyzable session
+                print(w)
+                t_p_obs[mouse_id].append(np.asarray([np.nan]))
+                t_p_opt[mouse_id].append(np.asarray([np.nan]))
+                t_t_obs[mouse_id].append(np.asarray([np.nan]))
+                t_t_opt[mouse_id].append(np.asarray([np.nan]))
 
-        # Clear data for memory management
-        sess.clear_data()
+            # Clear data for memory management
+            sess.clear_data()
+            print('done.')
+        
+        # Save updated session variables
+        if save_updates:
+            save_sessions(mouse_id)
+        print()
+
+    # Plot individual learning curves
+    for mouse_id in mouse_ids:
+        print('Plotting residence/travel times for mouse %s...' % mouse_id, end=' ')
+        plot.plot_residence_times(days[mouse_id], t_p_obs[mouse_id], 
+                                t_p_opt[mouse_id], **config['mvt']['kwargs'])
+        plot.save_figure(results_dir + mouse_id + '/t_p_vs_day.pdf')
+        plot.plot_travel_times(days[mouse_id], t_t_obs[mouse_id], **config['mvt']['kwargs'])
+        plt.savefig(results_dir + mouse_id + '/t_t_vs_day.pdf')
         print('done.')
-    
-    # Save updated session variables
-    if save_updates:
-        save_sessions(mouse_id)
-    print()
 
-# Plot individual learning curves
-for mouse_id in mouse_ids:
-    print('Plotting residence/travel times for mouse %s...' % mouse_id, end=' ')
-    plot.plot_residence_times(days[mouse_id], t_p_obs[mouse_id], 
-                              t_p_opt[mouse_id], **config['mvt'])
-    plot.save_figure(results_dir + mouse_id + '/t_p_vs_day.pdf')
-    plot.plot_travel_times(days[mouse_id], t_t_obs[mouse_id], **config['mvt'])
-    plt.savefig(results_dir + mouse_id + '/t_t_vs_day.pdf')
+    # Plot population learning curve
+    print('Plotting population learning curve...', end=' ')
+    plot.plot_residence_times(days, t_p_obs, t_p_opt, **config['mvt']['kwargs'])
+    plot.save_figure(results_dir + exp_name + '/t_p_vs_day.pdf')
+    plot.plot_travel_times(days, t_t_obs, **config['mvt']['kwargs'])
+    plt.savefig(results_dir + exp_name + '/t_t_vs_day.pdf')
     print('done.')
-
-# Plot population learning curve
-print('Plotting population learning curve...', end=' ')
-plot.plot_residence_times(days, t_p_obs, t_p_opt, **config['mvt'])
-plot.save_figure(results_dir + exp_name + '/t_p_vs_day.pdf')
-plot.plot_travel_times(days, t_t_obs, **config['mvt'])
-plt.savefig(results_dir + exp_name + '/t_t_vs_day.pdf')
-print('done.')
 
 
 ############################ Lick analysis ####################################
-print('LICK ANALYSIS')
+if config['lick']['analyze']:
+    print('LICK ANALYSIS')
 
-# Placeholders
-lick_stats = {'n_total': {},
-              'n_patch': {},
-              'n_interpatch': {},
-              'f_patch': {},
-              'f_interpatch': {}}
-
-# Get stats over sessions
-for mouse_id in mouse_ids:
-    print('Analyzing mouse %s:' % mouse_id)
-    
     # Placeholders
-    for k in lick_stats.keys():
-        lick_stats[k][mouse_id] = []
-    
-    for sess, day in zip(sessions[mouse_id], days[mouse_id]):
-        print('Processing session %d...' % day)
+    lick_stats = {'n_total': {},
+                'n_patch': {},
+                'n_interpatch': {},
+                'f_patch': {},
+                'f_interpatch': {}}
+
+    # Get stats over sessions
+    for mouse_id in mouse_ids:
+        print('Analyzing mouse %s:' % mouse_id)
         
-        # Add stats in format: lick_stats[key][mouse]
-        try:
-            lick_stats_ = get_lick_stats(sess)
-            for k in lick_stats.keys():
-                lick_stats[k][mouse_id].append(lick_stats_[k])
-        except UserWarning as w: # unanalyzable session
-            print(w)
-            for k in lick_stats.keys():
-                lick_stats[k][mouse_id].append(np.asarray([np.nan]))
+        # Placeholders
+        for k in lick_stats.keys():
+            lick_stats[k][mouse_id] = []
         
-        # Clear data for memory management
-        sess.clear_data()
-        print('done.')
-    
-    # Save updated session variables
-    if save_updates:
-        save_sessions(mouse_id)
-    print()
+        for sess, day in zip(sessions[mouse_id], days[mouse_id]):
+            print('Processing session %d...' % day, end=' ')
+            
+            # Add stats in format: lick_stats[key][mouse]
+            try:
+                lick_stats_ = get_lick_stats(sess)
+                for k in lick_stats.keys():
+                    lick_stats[k][mouse_id].append(lick_stats_[k])
+            except UserWarning as w: # unanalyzable session
+                print(w)
+                for k in lick_stats.keys():
+                    lick_stats[k][mouse_id].append(np.asarray([np.nan]))
+            
+            # Clear data for memory management
+            sess.clear_data()
+            print('done.')
         
-print('Done.')
+        # Save updated session variables
+        if save_updates:
+            save_sessions(mouse_id)
+        print()
+            
+    print('Done.')
