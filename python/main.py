@@ -93,7 +93,7 @@ for mouse_id in mouse_ids:
         print('Loading session %02d...' % day, end=' ')
         try:
             filepath = sess_dir + mouse_id + '/%02d.p' % day 
-            sess.load(filepath)
+            sess.load(filepath, ignore_keys=['data_names', 'var_names'])
             print('loaded.')
         except FileNotFoundError:
             print('file not found.') 

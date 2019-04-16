@@ -617,9 +617,14 @@ def get_patch_statistics(stats,
         idx_ = (ids_all == idx)
         if ignore_nan:
             idx_[np.isnan(stats_all)] = False
-        stats_id[i] = f(stats_all[idx_])
-        for i in range(n_args):
-            args_id[i].append(args_all[i][idx_])
+        if np.sum(idx_) > 0:
+            stats_id[i] = f(stats_all[idx_])
+            for i in range(n_args):
+                args_id[i].append(args_all[i][idx_])
+        else:
+            stats_id[i] = np.array([np.nan])
+            for i in range(n_args):
+                args_id[i].append([])
     
     if n_args > 0:
         if return_all:
