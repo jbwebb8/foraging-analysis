@@ -1,3 +1,8 @@
+# Ignore annoying FutureWarning from h5py
+import warnings
+warnings.simplefilter('ignore', category=FutureWarning)
+
+# Imports
 import h5py
 import re
 import pickle
@@ -388,7 +393,7 @@ class Session:
         req_vars = ['t_patch']
         self._check_attributes(var_names=req_vars)
 
-        return np.squeeze(np.diff(self.vars['t_patch'], axis=1))
+        return np.diff(self.vars['t_patch'], axis=1)[:, 0]
 
     def get_interpatch_durations(self):
         # Requirements
@@ -452,6 +457,10 @@ class Session:
         idx_on_end = (np.argwhere((is_on - np.roll(is_on, -1)) == 1) + 1).flatten()
         if not is_on[0] and is_on[-1]:
             idx_on_end = idx_on_end[:-1]
+
+        # Correct if session ended with motor on
+        if idx_on_start.shape[0] == idx_on_end.shape[0] + 1:
+            idx_on_end = np.append(idx_on_end, is_on.shape[0]-1)
 
         return is_on, idx_on_start, idx_on_end
 
@@ -540,6 +549,13 @@ class Session:
         
         return v_smooth
 
+    def get_reward_volumes(self):
+        # Requirements
+        req_data = ['reward']
+        self._check_attributes(data_names=req_data)
+
+        return self.data['reward'][self.data['reward'] > 0]
+
     def get_harvest_rate(self, metric='observed', **kwargs):
         if metric == 'observed':
             return self._get_observed_harvest_rate(**kwargs)
@@ -551,14 +567,13 @@ class Session:
     def _get_observed_harvest_rate(self, per_patch=True, return_all=False):
         if per_patch:
             # Requirements
-            required_data = ['reward']
             required_vars = ['t_patch', 't_motor', 'dt_motor', 'n_motor_rem']
-            self._check_attributes(data_names=required_data, var_names=required_vars)
+            self._check_attributes(var_names=required_vars)
             if self.vars['t_motor'].size == 0:
                 return np.zeros(self.vars['t_patch'].shape[0])
             
             # Filter logged reward volumes by those given
-            r_log = self.data['reward'][self.data['reward'] > 0]
+            r_log = self.get_reward_volumes()
 
             # Create linear map from motor duration to reward volume
             # (V = duration x flow_rate is not reliable)
@@ -574,8 +589,8 @@ class Session:
             # Find patches in which rewards given
             pad = 0.5 # padding in seconds
             idx_patch = in_interval(self.vars['t_motor'],
-                                    self.vars['t_patch'][:, 0],
-                                    self.vars['t_patch'][:, 1],
+                                    self.vars['t_patch'][:, 0]-pad,
+                                    self.vars['t_patch'][:, 1]+pad,
                                     query='event')
             if (idx_patch > 1).any():
                 raise UserWarning('Motor times cannot be uniquely assigned'
