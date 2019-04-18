@@ -5,7 +5,7 @@ import numpy as np
 import math
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
-from util import _check_list, MDAReader, format_elapsed_time
+import util
 
 try:
     from mountainlab_pytools.mdaio import writemda64
@@ -48,8 +48,7 @@ def sort_spikes(*,
     print('Loading parameters...', end=' ')
     if config is not None:
         if isinstance(config, str): # JSON filename
-            with open(config, 'r') as f:
-                user_params = json.loads(f.read())
+            user_params = util.load_json(config)
         elif isinstance(config, dict):
             user_params = config
     else:
@@ -62,6 +61,10 @@ def sort_spikes(*,
         else:
             params[k] = DEFAULT_SORT_PARAMS[k]
     print('done.')
+
+    # Annoying bug: booleans must be lowercase strings
+    util.recursive_dict_search(params, True, 'true')
+    util.recursive_dict_search(params, False, 'false')
 
     # File settings
     output_dir = params['output_dir']
@@ -177,7 +180,7 @@ def track_pipeline_progress(mlclient):
             t_1 = job_times[name][0]
             t_2 = time.time()
             job_times[name].append(t_2)
-            h, m, s = format_elapsed_time(t_2 - t_1)
+            h, m, s = util.format_elapsed_time(t_2 - t_1)
             print('Finished %s (time: %02d:%02d:%02.2f)' % (name, h, m, s))
 
         # Update current job statuses
@@ -185,7 +188,7 @@ def track_pipeline_progress(mlclient):
         time.sleep(1)
     
     # Print total elapsed time
-    h, m, s = format_elapsed_time(time.time() - t_start)
+    h, m, s = util.format_elapsed_time(time.time() - t_start)
     print('Finished script. (total time: %02d:%02d:%02d)' % (h, m, round(s)))
 
 def _get_sort_status(mlclient):
@@ -222,13 +225,13 @@ def create_merge_map(*, firings_old, firings_new, merge_map_out=None):
     if isinstance(firings_old, str):
         firings_old_filepath = firings_old
         with open(firings_old, 'rb') as f:
-            firings_old = MDAReader(f).read()
+            firings_old = util.MDAReader(f).read()
     else:
         firings_old_filepath = ''
     if isinstance(firings_new, str):
         firings_new_filepath = firings_new
         with open(firings_new, 'rb') as f:
-            firings_new = MDAReader(f).read()
+            firings_new = util.MDAReader(f).read()
     else:
         firings_new_filepath = ''
 
@@ -312,10 +315,10 @@ def get_templates(*, timeseries,
     # Load files if needed
     # firings can be loaded in memory, but timeseries usually too big
     if isinstance(timeseries, str):
-        timeseries = MDAReader(open(timeseries, 'rb')) 
+        timeseries = util.MDAReader(open(timeseries, 'rb')) 
     if isinstance(firings, str):
         with open(firings, 'rb') as f:
-            firings = MDAReader(f).read()
+            firings = util.MDAReader(f).read()
 
     # Set parameters
     cluster_labels = np.unique(firings[2, :])
@@ -383,7 +386,7 @@ def plot_templates(*, timeseries=None,
     elif templates is not None:
         if isinstance(templates, str):
             with open(templates, 'rb') as f:
-                templates = MDAReader(f).read()
+                templates = util.MDAReader(f).read()
     
     # Get labels
     if labels is not None:
@@ -509,14 +512,14 @@ def curate_firings(*, firings,
     # Load files if needed
     if isinstance(firings, str):
         with open(firings, 'rb') as f:
-            firings = MDAReader(f).read()
+            firings = util.MDAReader(f).read()
     if isinstance(metrics, str):
         with open(metrics, 'r') as f:
             metrics = json.loads(f.read())
     
     # Make lists if needed
-    keep_tags = _check_list(keep_tags)
-    exclude_tags = _check_list(exclude_tags)
+    keep_tags = util._check_list(keep_tags)
+    exclude_tags = util._check_list(exclude_tags)
 
     # Get cluster metrics
     labels = np.array([c['label'] for c in metrics['clusters']])
