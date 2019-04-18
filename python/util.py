@@ -25,6 +25,31 @@ def _check_list(names):
         names = [names]
     return names
 
+def load_json(filepath, auto_replace=True):
+    """
+    Loads JSON file from filename into python dictionary.
+
+    Args:
+    - filepath (str): Location of JSON file to load.
+    - auto_replace (bool): If True, automically replace common data types
+        formatted as strings in JSON file to appropriate Python data types
+        (e.g. boolean, None)
+    """
+    with open(filepath, 'r') as f:
+        d = json.loads(f.read())
+    
+    if auto_replace:
+        replace_dict = {'True': True,
+                        'true': True,
+                        'False': False,
+                        'false': False,
+                        'None': None,
+                        'none': None}
+        for v_old, v_new in replace_dict.items():
+            recursive_dict_search(d, v_old, v_new)
+    
+    return d
+
 def recursive_dict_search(dictionary, old_value, new_value):
     """
     Replaces all key-old_value pairs with key-new_value pairs in dictionary.
