@@ -2,7 +2,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import math
-from util import get_patch_statistics, _check_list
+from util import get_patch_statistics, _check_list, in_interval
 
 class Plotter:
 
@@ -223,6 +223,72 @@ class Plotter:
         self.ax.set_yscale('log')
         xlim = self.ax.get_xlim()
         self.ax.set_xlim([xlim[0], xlim[1] + 5])
+
+    def plot_session_summary(self, *,
+                             T,
+                             t_patch,
+                             t_lick,
+                             t_motor,
+                             dt_chunk=250,
+                             figsize=(20, 10),
+                             c_patch='green',
+                             c_lick='black',
+                             c_motor='red'):
+        # Create new figure
+        self.create_new_figure(figsize=figsize)
+
+        # Plot by time chunk
+        n_chunks = math.ceil(T/dt_chunk)
+        for i in range(n_chunks):
+            t_start = i * dt_chunk
+            t_stop = (i+1) * dt_chunk
+            
+            # Get patch times within chunk
+            idx_start = in_interval(t_patch[:, 0], 
+                                    np.asarray([t_start]), 
+                                    np.asarray([t_stop]),
+                                    query='event')
+            idx_stop = in_interval(t_patch[:, 1], 
+                                   np.asarray([t_start]), 
+                                   np.asarray([t_stop]),
+                                   query='event')
+            idx = ((idx_start + idx_stop) > 0)
+            t_patch_ = t_patch[idx, :]
+
+            # Correct corner cases to include fraction of intervals
+            if t_patch_.shape[0] > 0:
+                t_patch_[0, 0] = max(t_patch_[0, 0], t_start)
+                t_patch_[-1, -1] = min(t_patch_[-1, -1], t_stop-0.01) # avoids zero-ing with modular division
+            
+            # Plot filled rectangles to represent patches
+            t_patch_ %= dt_chunk
+            for j in range(t_patch_.shape[0]):
+                h_patch = self.ax.fill_between(t_patch_[j], i-0.3, i+0.3, color=c_patch, alpha=0.25)
+
+            # Plot lick times within chunk
+            idx = in_interval(t_lick, 
+                              np.asarray([t_start]), 
+                              np.asarray([t_stop]),
+                              query='event')
+            t_lick_ = t_lick[idx.astype(np.bool)] % dt_chunk
+            h_lick = self.ax.vlines(t_lick_, i-0.3, i+0.3, color=c_lick)
+            
+            # Plot motor times within chunk
+            idx = in_interval(t_motor, 
+                              np.asarray([t_start]), 
+                              np.asarray([t_stop]),
+                              query='event')
+            t_motor_ = t_motor[idx.astype(np.bool)] % dt_chunk
+            h_motor = self.ax.vlines(t_motor_, i-0.3, i+0.3, color=c_motor)
+
+        # Plot settings
+        self.ax.set_yticklabels(self.ax.get_yticks()*dt_chunk)
+        self.ax.set_xticks([])
+        self.ax.legend([h_patch, h_lick, h_motor], ['patch', 'lick', 'reward'], loc=4)
+        self.ax.invert_yaxis()
+        self.ax.spines['top'].set_visible(False)
+        self.ax.spines['right'].set_visible(False)
+        self.ax.spines['bottom'].set_visible(False)
 
     def plot_psth(self, *,
                   counts,
