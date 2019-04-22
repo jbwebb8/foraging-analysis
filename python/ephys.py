@@ -5,9 +5,15 @@ import numpy as np
 import math
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
-from mountainlab_pytools.mdaio import writemda64
-from mountainlab_pytools import mlproc as mlp
 import util
+
+try:
+    from mountainlab_pytools.mdaio import writemda64
+    from mountainlab_pytools import mlproc as mlp
+except ModuleNotFoundError as e:
+    print('mountainlab_pytools module not installed. Some functions'
+          ' from the ephys package may not be available.')
+
 
 ### MountainSort functions ###
 DEFAULT_SORT_PARAMS = {
