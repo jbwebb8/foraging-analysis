@@ -114,7 +114,7 @@ plot = Plotter(**plot_settings)
 
 # Save config file for reference
 with open(results_dir + exp_name + '/config.json', 'w') as f:
-    json.dump(config, f)
+    json.dump(config, f, indent=4, sort_keys=True)
 
 ####################### Harvest rate analysis #################################
 if config['harvest_rate']['analyze']:
