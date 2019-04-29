@@ -552,9 +552,18 @@ class Session:
     def get_reward_volumes(self):
         # Requirements
         req_data = ['reward']
-        self._check_attributes(data_names=req_data)
+        req_vars = ['t_motor', 'n_motor_rem']
+        self._check_attributes(data_names=req_data, var_names=req_vars)
 
-        return self.data['reward'][self.data['reward'] > 0]
+        # Get logged volumes
+        r_log = self.data['reward'][self.data['reward'] > 0]
+
+        # Compare motor trace to logged reward volume
+        if len(r_log) != len(self.vars['t_motor']) + self.vars['n_motor_rem']:
+            raise UserWarning('Logged rewards do not match motor trace.')
+        r_log = r_log[:self.vars['t_motor'].shape[0]] # filters by t_stop 
+
+        return r_log
 
     def get_harvest_rate(self, metric='observed', **kwargs):
         if metric == 'observed':
@@ -567,7 +576,7 @@ class Session:
     def _get_observed_harvest_rate(self, per_patch=True, return_all=False):
         if per_patch:
             # Requirements
-            required_vars = ['t_patch', 't_motor', 'dt_motor', 'n_motor_rem']
+            required_vars = ['t_patch', 't_motor', 'dt_motor']
             self._check_attributes(var_names=required_vars)
             if self.vars['t_motor'].size == 0:
                 return np.zeros(self.vars['t_patch'].shape[0])
@@ -580,11 +589,6 @@ class Session:
             #m = ( (np.max(r_log) - np.min(r_log))
             #    / (np.max(self.vars['dt_motor']) - np.min(self.vars['dt_motor'])) )
             #r_motor = lambda dt: m*dt - m*np.max(self.vars['dt_motor']) + np.max(r_log)
-
-            # Just compare motor trace to logged reward volume
-            if len(r_log) != len(self.vars['t_motor']) + self.vars['n_motor_rem']:
-                raise UserWarning('Logged rewards do not match motor trace.')
-            r_log = r_log[:self.vars['t_motor'].shape[0]]
 
             # Find patches in which rewards given
             pad = 0.5 # padding in seconds
