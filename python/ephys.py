@@ -723,158 +723,12 @@ def estimate_firing_rate(*,
 
 
 ### Dimensionality reduction ###
-def reduce_dimensions(Y,
-                      method='PCA',
-                      **kwargs):
-    """
-    Performs dimensionality reduction on spike counts or firing rates based
-    on the specified method.
-
-    Args:
-    - Y (ndarray, [N, q, T]): Array containing the spike information. Note that
-        it must be in the shape [# trials, # units, # time bins]. 
-    - method (str): Dimensionality reduction method to apply. Options are:
-        - 'pca'
-        - 'ppca'
-        - 'fa'
-        - 'gpfa'
-    
-    Returns:
-    - params
-    - X
-    """
-    # Check input
-    if Y.ndim != 3:
-        raise SyntaxError('Y must be 3D array has %d dimensions.' % Y.ndim)
-    else:
-        # Placeholder for reference
-        N = Y.shape[0] # number of trials
-        q = Y.shape[1] # number of units
-        T = Y.shape[2] # number of time bins
-
-    # Apply dimensionality reduction method
-    if method.lower() in ['pca', 'ppca', 'fa']:
-        return _apply_two_step_method(Y, method, **kwargs)
-    elif method.lower() == 'gpfa':
-        return _apply_gpfa(Y, **kwargs)
-    else:
-        raise ValueError('Unknown method \'%s\'.' % method)
-
-def _apply_two_step_method(Y,
-                           method,
-                           **kwargs):
-    """
-    """
-    # Shapes
-    N = Y.shape[0] # number of trials
-    q = Y.shape[1] # number of units
-    T = Y.shape[2] # number of time bins
-
-    # Unroll into single series
-    Y_rs = Y.transpose([1, 2, 0]).reshape([q, -1], order='F')
-
-    # Calculate parameters and projections for given method
-    params = _calculate_params(Y_rs, method, **kwargs)
-    X = _calculate_projections(Y, method, **params, **kwargs)
-
-    return params, X
-
-def _apply_gpfa(Y, **kwargs):
-    # Shapes
-    N = Y.shape[0] # number of trials
-    q = Y.shape[1] # number of units
-    T = Y.shape[2] # number of time bins
-
-    # Calculate parameters and projections
-    params = _calculate_params(Y, 'gpfa', **kwargs)
-    X = _calculate_projections(Y, 'gpfa', **kwargs)
-
-    return params, X
-
-def _calculate_params(Y, method, **kwargs):
-    """
-    """
-    if method.lower() == 'pca':
-        return _calculate_PCA_params(Y, **kwargs)
-    elif method.lower() == 'ppca':
-        return _calculate_PPCA_params(Y, **kwargs)
-    elif method.lower() == 'fa':
-        return _calculate_FA_params(Y, **kwargs)
-    elif method.lower() == 'gpfa':
-        return _calculate_GPFA_params(Y, **kwargs)
-    else:
-        raise ValueError('Unknown method \'%s\'.' % method)
-
-def _calculate_projections(Y, method, **kwargs):
-    """
-    """
-    if method.lower() == 'pca':
-        return _calculate_PCA_projections(Y, **kwargs)
-    elif method.lower() == 'ppca':
-        return _calculate_PPCA_projections(Y, **kwargs)
-    elif method.lower() == 'fa':
-        return _calculate_FA_projections(Y, **kwargs)
-    else:
-        raise ValueError('Unknown method \'%s\'.' % method)
-
-def calculate_error(Y,
-                    method='PCA',
-                    err_type='bp',
-                    **kwargs):
-    """
-    Because PCA parameters can be computed once and reused for all number
-    of latent dimensions, separate error functions by PCA, and PPCA/FA.
-    """
-    
-    if method.lower() == 'pca':
-        return _PCA_error(Y, err_type, **kwargs)
-    elif method.lower() in ['ppca', 'fa']:
-        return _PPCA_FA_error(Y, err_type, method, **kwargs)
-    else:
-        raise SyntaxError('Unknown method \'%s\'.' % method)
-
-
-
-def _PPCA_FA_error(Y,
-                   err_type,
-                   method,
-                   p_range=None,
-                   verbose=False):
-    # Shapes
-    N = Y.shape[0] # number of trials
-    q = Y.shape[1] # number of units
-    T = Y.shape[2] # number of time bins
-    
-    # Setup
-    if p_range is None:
-        p_range = np.arange(1, q+1)
-    error = np.zeros(len(p_range))
-
-    # Iterate over all trials
-    for n in range(N):
-        if verbose:
-            print('Calculating error for trial %d of %d...' % (n+1, N))
-            it = tqdm_notebook(p_range)
-        else:
-            it = p_range
-
-        # Separate train (-n) and test (n) data
-        Y_train = np.delete(Y, n, axis=0) # remove nth trial
-        #Y_train = Y_train.transpose([1, 2, 0]).reshape([q, -1], order='F')
-        Y_test = Y[n].reshape([q, -1], order='F')
-        
-        
-
-def _calculate_GPFA_params(Y,
-                           dt_bin=1.0,
-                           **kwargs):
-    gpfa = _GPFA(Y, dt_bin=dt_bin)
-    return gpfa.fit(**kwargs)
-
-
 class LatentModel:
 
     def __init__(self, *, p):
+        """
+        Performs dimensionality reduction on spike counts or firing rates.
+        """
         # Set model parameters
         self.p = p
 
@@ -891,6 +745,16 @@ class LatentModel:
             raise SyntaxError('Test data does not have the proper input shape.')
 
     def fit(self, Y, **kwargs):
+        """
+        Fits model to provided spike data.
+
+        Args:
+        - Y (ndarray, [N, q, T]): Array containing the spike information. Note that
+            it must be in the shape [# trials, # units, # time bins]. 
+        
+        Returns:
+        - self
+        """
         # Check data format
         self._check_data(Y)
 
@@ -1378,15 +1242,16 @@ class GPFA(LatentModel):
         T = self.Y.shape[2]
 
         # Initialize FA parameters
-        params, _ = _apply_two_step_method(self.Y,
-                                           'fa',
-                                           p=self.p, 
-                                           C_init=C_init,
-                                           d_init=d_init,
-                                           R_init=R_init,
-                                           EM_steps=EM_steps,
-                                           orthonormal=False)
+        fa = FA(p=self.p)
+        fa.fit(self.Y,
+               C_init=C_init,
+               d_init=d_init,
+               R_init=R_init,
+               EM_steps=EM_steps,
+               orthonormal=False)
+        params = fa.get_params('C', 'd', 'R')
         self._C, self._d, self._R = params['C'], params['d'], params['R']
+        fa = None # release memory
 
         # Precompute matrices for GP updates
         self._T_1 = np.ones([T, T]) * np.arange(1, T+1)[:, np.newaxis]
