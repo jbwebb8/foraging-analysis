@@ -1,5 +1,6 @@
 ### Functions for future ephys-analysis repo ###
 import json
+import warnings
 import time
 import math
 import matplotlib.pyplot as plt
@@ -740,6 +741,9 @@ class LatentModel:
         if self.Y is None:
             if Y.ndim != 3:
                 raise SyntaxError('Training data must have three dimensions.')
+            elif (np.sum(Y, axis=(0, 2)) == 0).any():
+                warnings.warn('Training data contains a row of zeros. This may '
+                              'lead to errors fitting data.', UserWarning, 2)
         # Test data
         elif self.Y.shape[1] not in Y.shape:
             raise SyntaxError('Test data does not have the proper input shape.')
@@ -787,7 +791,7 @@ class LatentModel:
         return param_dict
 
     def set_params(self, **params):
-        for k, v in params:
+        for k, v in params.items():
             if k in self.PARAM_NAMES:
                 setattr(self, '_'+k, v)
             else:
@@ -1162,7 +1166,7 @@ class FA(LatentModel):
             E_x = self._C.T.dot(A_inv).dot(Y_rs - self._d) # matrix form
             sum_E_xxT = ( (np.eye(self.p) - self._C.T.dot(A_inv.dot(self._C)))*(N*T) 
                           + E_x.dot(E_x.T) ) # summation form
-            
+
             # M-step: update C and R to maximize likelihood
             # (which maximizes expected joint probability wrt parameters)
             self._C = ((Y_rs - self._d).dot(E_x.T)).dot(np.linalg.inv(sum_E_xxT))
@@ -1242,13 +1246,15 @@ class GPFA(LatentModel):
         T = self.Y.shape[2]
 
         # Initialize FA parameters
+        if verbose:
+            print('Fitting initial FA parameters...')
         fa = FA(p=self.p)
         fa.fit(self.Y,
                C_init=C_init,
                d_init=d_init,
                R_init=R_init,
                EM_steps=EM_steps,
-               orthonormal=False)
+               verbose=verbose)
         params = fa.get_params('C', 'd', 'R')
         self._C, self._d, self._R = params['C'], params['d'], params['R']
         fa = None # release memory
@@ -1264,6 +1270,7 @@ class GPFA(LatentModel):
         # Set progress bar
         if verbose:
             it = tqdm_notebook(range(EM_steps))
+            print('Running joint GPFA EM algorithm...')
         else:
             it = range(EM_steps)
         
@@ -1275,7 +1282,7 @@ class GPFA(LatentModel):
             cache = [np.copy(getattr(self, name)) for name in cache_names]
 
             # Optimize FA parameters via EM algorithm
-            E_xt, E_xtxtT, E_xiTxi = self._expectation(self.Y, EM_steps)
+            E_xt, E_xtxtT, E_xiTxi = self._expectation(self.Y)
             self._update_Cd(E_xt, E_xtxtT)
             self._update_R(E_xt)
             
@@ -1299,7 +1306,7 @@ class GPFA(LatentModel):
         return self
 
     # GPFA EM functions
-    def _expectation(self, Y, EM_steps):
+    def _expectation(self, Y):
         # Shapes
         p = self.p # number of latent dimensions
         N = Y.shape[0] # number of trials
@@ -1502,15 +1509,8 @@ class GPFA(LatentModel):
         # Assert correct shape
         assert Y.ndim == 3
 
-        # Shapes
-        N = Y.shape[0] # number of trials
-        q = Y.shape[1] # number of units
-        T = Y.shape[2] # number of time bins
-
         # Calculate projections of X | Y for each trial
-        E_xt = np.zeros([N, self.p, T])
-        for n in range(N):
-            E_xt[n], _, _ = self._expectation(Y[n])
+        E_xt, _, _ = self._expectation(Y)
 
         # Linearly tranform x into othornomal space U
         if orthonormal:
