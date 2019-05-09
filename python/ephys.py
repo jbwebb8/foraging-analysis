@@ -796,6 +796,8 @@ class LatentModel:
                 setattr(self, '_'+k, v)
             else:
                 raise ValueError('Unknown parameter \'%s\'.')
+        
+        return self
 
     def project(self, Y, **kwargs):
         # Check data format
