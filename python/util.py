@@ -25,6 +25,31 @@ def _check_list(names):
         names = [names]
     return names
 
+def load_json(filepath, auto_replace=True):
+    """
+    Loads JSON file from filename into python dictionary.
+
+    Args:
+    - filepath (str): Location of JSON file to load.
+    - auto_replace (bool): If True, automically replace common data types
+        formatted as strings in JSON file to appropriate Python data types
+        (e.g. boolean, None)
+    """
+    with open(filepath, 'r') as f:
+        d = json.loads(f.read())
+    
+    if auto_replace:
+        replace_dict = {'True': True,
+                        'true': True,
+                        'False': False,
+                        'false': False,
+                        'None': None,
+                        'none': None}
+        for v_old, v_new in replace_dict.items():
+            recursive_dict_search(d, v_old, v_new)
+    
+    return d
+
 def recursive_dict_search(dictionary, old_value, new_value):
     """
     Replaces all key-old_value pairs with key-new_value pairs in dictionary.
@@ -444,7 +469,23 @@ def find_data(mouse_id, files, ext='.mat', exclude_strs=[]):
 
 ### Array handling ###
 def in_interval(t, t1, t2, query='event', include_border=True):
-    # TODO: complete boolean for include_border
+    """
+    Determine which time points in a vector lie within the interval [t1, t2].
+
+    Args:
+    - t (ndarray): 1D array containing time points to query.
+    - t1 (ndarray): 1D array containing time points defining interval starts.
+    - t1 (ndarray): 1D array containing time points defining interval ends.
+    - query (str): Specifies the type of information to return.
+        - 'event': Returns 1D array of len(t) in which the ith entry corresponds 
+            to the number of intervals containing t[i].
+        - 'interval': Returns 1D array of len(t1) in which the ith entry
+            corresponds to the number of events in t contained in the ith interval.
+        - 'array': Returns 2D array in which the [i, j] entry is True if t[i]
+            is contained in the jth interval.
+        - 'event_interval': Returns 1) 1D array containing event indices and 2)
+            1D array of which interval(s) contain the corresponding event indices 
+    """
     gt_t1 = (t[np.newaxis, :] >= t1[:, np.newaxis])
     lt_t2 = (t[np.newaxis, :] <= t2[:, np.newaxis])
     bt_t1_t2 = np.logical_and(gt_t1, lt_t2)
@@ -455,6 +496,8 @@ def in_interval(t, t1, t2, query='event', include_border=True):
         return np.sum(bt_t1_t2.astype(np.int32), axis=1)
     elif query == 'array':
         return bt_t1_t2
+    elif query == 'event_interval':
+        return np.argwhere(bt_t1_t2)[:, 1], np.argwhere(bt_t1_t2)[:, 0]
     else:
         raise SyntaxError('Unknown query \'%s\'.' % query)
 
@@ -617,9 +660,14 @@ def get_patch_statistics(stats,
         idx_ = (ids_all == idx)
         if ignore_nan:
             idx_[np.isnan(stats_all)] = False
-        stats_id[i] = f(stats_all[idx_])
-        for i in range(n_args):
-            args_id[i].append(args_all[i][idx_])
+        if np.sum(idx_) > 0:
+            stats_id[i] = f(stats_all[idx_])
+            for i in range(n_args):
+                args_id[i].append(args_all[i][idx_])
+        else:
+            stats_id[i] = np.array([np.nan])
+            for i in range(n_args):
+                args_id[i].append([])
     
     if n_args > 0:
         if return_all:

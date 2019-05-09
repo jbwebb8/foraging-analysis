@@ -90,9 +90,14 @@ def compare_patch_times(dt_patch_1, dt_patch_2, atol=1.0, rtol=0.02):
             dt_patch_2 = dt_patch_2[1:]
             idx_last -= 1
 
-        return np.isclose(dt_patch_1[:idx_last], 
-                          dt_patch_2[:idx_last],
-                          atol=atol, rtol=rtol).all()
+        # Corner case 3: only one patch, dropped above
+        if ((dt_patch_1.size == 0 or dt_patch_2.size == 0)
+            or (abs(dt_patch_1.shape[0] - dt_patch_2.shape[0]) > 1)):
+            return False
+        else:
+            return np.isclose(dt_patch_1[:idx_last], 
+                            dt_patch_2[:idx_last],
+                            atol=atol, rtol=rtol).all()
 
 
 ### Patch-foraging theory ###

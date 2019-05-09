@@ -1,3 +1,8 @@
+# Ignore annoying FutureWarning from h5py
+import warnings
+warnings.simplefilter('ignore', category=FutureWarning)
+
+# Imports
 import h5py
 import re
 import pickle
@@ -26,8 +31,8 @@ class Session:
         self.data_names = ['sound', 'motor', 'lick', 'fs', 'wheel_time', 
                            'wheel_speed', 'wheel_position', 'dt_patch']
         self.var_names = ['T', 't_patch', 'in_patch', 't_stop', 's_var',
-                          'fs_s', 't_s', 't_motor', 'dt_motor', 't_lick',
-                          't_wheel', 'v_smooth']
+                          'fs_s', 't_s', 't_motor', 'dt_motor', 'n_motor_rem',
+                          't_lick', 't_wheel', 'v_smooth']
         self.settings = {}
         struct = self.f['Settings']['Property']
 
@@ -148,7 +153,7 @@ class Session:
             return self._get_patch_times(name)
         elif name in ['s_var', 'fs_s', 't_s']:
             return self.preprocess_sound(name)
-        elif name in ['t_motor', 'dt_motor']:
+        elif name in ['t_motor', 'dt_motor', 'n_motor_rem']:
             return self._get_motor_times(name)
         elif name == 't_lick':
             return self._get_lick_times()
@@ -304,6 +309,9 @@ class Session:
                         break
                 except IndexError: # empty array handling
                     pass
+
+        if not compare_patch_times(dt_patch, self.data['dt_patch']):
+            raise UserWarning('Unable to determine patch times from sound.')
                 
         return t_patch, in_patch, t_stop
 
@@ -385,7 +393,7 @@ class Session:
         req_vars = ['t_patch']
         self._check_attributes(var_names=req_vars)
 
-        return np.squeeze(np.diff(self.vars['t_patch'], axis=1))
+        return np.diff(self.vars['t_patch'], axis=1)[:, 0]
 
     def get_interpatch_durations(self):
         # Requirements
@@ -412,21 +420,49 @@ class Session:
         self._check_attributes(data_names=req_data, var_names=req_vars)
 
         # Find motor timestamps and durations
-        idx_stop = int(self.vars['t_stop'] * self.data['fs'])
-        motor = self.data['motor'][:idx_stop]
-        thresh = 2.5 # half of 5V square wave
-        is_pump = (motor > thresh).astype(np.int32)
-        idx_pump_start = (np.argwhere((is_pump - np.roll(is_pump, -1)) == -1) + 1).flatten()
-        idx_pump_end = (np.argwhere((is_pump - np.roll(is_pump, -1)) == 1) + 1).flatten() 
-        t_motor = idx_pump_start / self.data['fs']
-        dt_motor = (idx_pump_end - idx_pump_start) / self.data['fs']
+        if var_name in ['t_motor', 'dt_motor']:
+            thresh = 2.5 # half of 5V square wave
+            idx_stop = int(self.vars['t_stop'] * self.data['fs'])
+            motor = self.data['motor'][:idx_stop]
+            is_pump, idx_pump_start, idx_pump_end = self._find_threshold_crossings(motor, thresh)
+            t_motor = idx_pump_start / self.data['fs']
+            dt_motor = (idx_pump_end - idx_pump_start) / self.data['fs']
 
-        if var_name == 't_motor':
-            return t_motor
-        elif var_name == 'dt_motor':
-            return dt_motor
+            if var_name == 't_motor':
+                return t_motor
+            elif var_name == 'dt_motor':
+                return dt_motor
+
+        # Find number of rewards outside analyzable period
+        # (for double checking reward logging)
+        elif var_name == 'n_motor_rem':
+            thresh = 2.5 # half of 5V square wave
+            idx_stop = int(self.vars['t_stop'] * self.data['fs'])
+            motor = self.data['motor'][idx_stop:]
+            is_pump, idx_pump_start, idx_pump_end = self._find_threshold_crossings(motor, thresh)
+            
+            return len(idx_pump_start)
+
         else:
             raise ValueError('Name \'%s\' not recognized.' % var_name)
+
+    def _find_threshold_crossings(self, y, thresh):
+        # Find where signal > thresh
+        is_on = (y > thresh).astype(np.int32)
+
+        # Find start and end of threshold crossings, correcting for end cases
+        idx_on_start = (np.argwhere((is_on - np.roll(is_on, -1)) == -1) + 1).flatten()
+        if is_on[0] and not is_on[-1]:
+            idx_on_start = idx_on_start[:-1]
+        idx_on_end = (np.argwhere((is_on - np.roll(is_on, -1)) == 1) + 1).flatten()
+        if not is_on[0] and is_on[-1]:
+            idx_on_end = idx_on_end[:-1]
+
+        # Correct if session ended with motor on
+        if idx_on_start.shape[0] == idx_on_end.shape[0] + 1:
+            idx_on_end = np.append(idx_on_end, is_on.shape[0]-1)
+
+        return is_on, idx_on_start, idx_on_end
 
     def get_lick_times(self):
         # Requirements
@@ -513,6 +549,22 @@ class Session:
         
         return v_smooth
 
+    def get_reward_volumes(self):
+        # Requirements
+        req_data = ['reward']
+        req_vars = ['t_motor', 'n_motor_rem']
+        self._check_attributes(data_names=req_data, var_names=req_vars)
+
+        # Get logged volumes
+        r_log = self.data['reward'][self.data['reward'] > 0]
+
+        # Compare motor trace to logged reward volume
+        if len(r_log) != len(self.vars['t_motor']) + self.vars['n_motor_rem']:
+            raise UserWarning('Logged rewards do not match motor trace.')
+        r_log = r_log[:self.vars['t_motor'].shape[0]] # filters by t_stop 
+
+        return r_log
+
     def get_harvest_rate(self, metric='observed', **kwargs):
         if metric == 'observed':
             return self._get_observed_harvest_rate(**kwargs)
@@ -524,32 +576,25 @@ class Session:
     def _get_observed_harvest_rate(self, per_patch=True, return_all=False):
         if per_patch:
             # Requirements
-            required_data = ['reward']
             required_vars = ['t_patch', 't_motor', 'dt_motor']
-            self._check_attributes(data_names=required_data, var_names=required_vars)
+            self._check_attributes(var_names=required_vars)
             if self.vars['t_motor'].size == 0:
                 return np.zeros(self.vars['t_patch'].shape[0])
             
+            # Filter logged reward volumes by those given
+            r_log = self.get_reward_volumes()
+
             # Create linear map from motor duration to reward volume
             # (V = duration x flow_rate is not reliable)
-            r_log = self.data['reward'][self.data['reward'] > 0]
-            m = ( (np.max(r_log) - np.min(r_log))
-                / (np.max(self.vars['dt_motor']) - np.min(self.vars['dt_motor'])) )
-            r_motor = lambda dt: m*dt - m*np.max(self.vars['dt_motor']) + np.max(r_log)
-
-            # Just compare motor trace to logged reward volume
-            #r_log = self.data['reward'][self.data['reward'] > 0]
-            # TODO: correct for rewards logged after t_stop
-            #r_log = r_log[:self.vars['t_motor'].shape[0]]
+            #m = ( (np.max(r_log) - np.min(r_log))
+            #    / (np.max(self.vars['dt_motor']) - np.min(self.vars['dt_motor'])) )
+            #r_motor = lambda dt: m*dt - m*np.max(self.vars['dt_motor']) + np.max(r_log)
 
             # Find patches in which rewards given
             pad = 0.5 # padding in seconds
-            #gt_t1 = self.vars['t_motor'][np.newaxis, :] > self.vars['t_patch'][:, 0, np.newaxis] - pad
-            #lt_t2 = self.vars['t_motor'][np.newaxis, :] < self.vars['t_patch'][:, 1, np.newaxis] + pad
-            #idx_patch = np.argwhere(np.logical_and(gt_t1, lt_t2))[:, 0]
             idx_patch = in_interval(self.vars['t_motor'],
-                                    self.vars['t_patch'][:, 0],
-                                    self.vars['t_patch'][:, 1],
+                                    self.vars['t_patch'][:, 0]-pad,
+                                    self.vars['t_patch'][:, 1]+pad,
                                     query='event')
             if (idx_patch > 1).any():
                 raise UserWarning('Motor times cannot be uniquely assigned'
@@ -559,9 +604,9 @@ class Session:
             # Calculate observed reward per patch
             r_patch_obs = np.zeros(self.vars['t_patch'].shape[0])
             for i in range(self.vars['t_patch'].shape[0]):
-                #r_patch_obs[i] = np.sum(self.vars['dt_motor'][idx_patch == i] * self.data['flow_rate'])
-                r_patch_obs[i] = np.sum(r_motor(self.vars['dt_motor'][idx_patch == i]))
-                #r_patch_obs[i] = np.sum(r_log[idx_patch == i])
+                #r_patch_obs[i] = np.sum(self.vars['dt_motor'][idx_patch == i]*self.data['flow_rate']) # flow rate
+                #r_patch_obs[i] = np.sum(r_motor(self.vars['dt_motor'][idx_patch == i])) # linear map
+                r_patch_obs[i] = np.sum(r_log[idx_patch == i]) # logged volumes
 
             # Divide reward per patch by segment time (patch + next interpatch)
             t_seg = self._get_segment_durations()
@@ -636,14 +681,17 @@ class Session:
         pickle.dump(d, f)
         f.close()
 
-    def load(self, filepath):
+    def load(self, filepath, load_keys=None, ignore_keys=[]):
         """
         Loads serialized dictionary of class instance.
         """
         f = open(filepath, 'rb')
         d = pickle.load(f)
+        if load_keys is None:
+            load_keys = d.keys()
         for k, v in d.items():
-            self.__dict__[k] = v # avoids overwriting h5py.File
+            if k in load_keys and not k in ignore_keys:
+                self.__dict__[k] = v # avoids overwriting h5py.File
         f.close()
 
 

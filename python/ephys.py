@@ -1,13 +1,31 @@
 ### Functions for future ephys-analysis repo ###
 import json
+import warnings
 import time
-import numpy as np
 import math
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
-from util import _check_list, MDAReader, format_elapsed_time
-from mountainlab_pytools.mdaio import writemda64
-from mountainlab_pytools import mlproc as mlp
+from tqdm import tqdm_notebook
+import util
+
+import numpy as np
+# NOTE: Currently cupy does not implement a mirror of several required numpy
+# functions, including np.block (GPFA), np.delete (error), np.linalg.eig (PCA),
+# so cupy does not work reliably for functions in this module.
+#try:
+#    import cupy as np
+#    print('cupy successfully imported.')
+#except ImportError as e:
+#    import numpy as np
+#    print('Error importing cupy. Defaulting to numpy.')
+
+try:
+    from mountainlab_pytools.mdaio import writemda64
+    from mountainlab_pytools import mlproc as mlp
+except ModuleNotFoundError as e:
+    print('mountainlab_pytools module not installed. Some functions'
+          ' from the ephys package may not be available.')
+
 
 ### MountainSort functions ###
 DEFAULT_SORT_PARAMS = {
@@ -42,8 +60,7 @@ def sort_spikes(*,
     print('Loading parameters...', end=' ')
     if config is not None:
         if isinstance(config, str): # JSON filename
-            with open(config, 'r') as f:
-                user_params = json.loads(f.read())
+            user_params = util.load_json(config)
         elif isinstance(config, dict):
             user_params = config
     else:
@@ -56,6 +73,10 @@ def sort_spikes(*,
         else:
             params[k] = DEFAULT_SORT_PARAMS[k]
     print('done.')
+
+    # Annoying bug: booleans must be lowercase strings
+    util.recursive_dict_search(params, True, 'true')
+    util.recursive_dict_search(params, False, 'false')
 
     # File settings
     output_dir = params['output_dir']
@@ -171,7 +192,7 @@ def track_pipeline_progress(mlclient):
             t_1 = job_times[name][0]
             t_2 = time.time()
             job_times[name].append(t_2)
-            h, m, s = format_elapsed_time(t_2 - t_1)
+            h, m, s = util.format_elapsed_time(t_2 - t_1)
             print('Finished %s (time: %02d:%02d:%02.2f)' % (name, h, m, s))
 
         # Update current job statuses
@@ -179,7 +200,7 @@ def track_pipeline_progress(mlclient):
         time.sleep(1)
     
     # Print total elapsed time
-    h, m, s = format_elapsed_time(time.time() - t_start)
+    h, m, s = util.format_elapsed_time(time.time() - t_start)
     print('Finished script. (total time: %02d:%02d:%02d)' % (h, m, round(s)))
 
 def _get_sort_status(mlclient):
@@ -216,13 +237,13 @@ def create_merge_map(*, firings_old, firings_new, merge_map_out=None):
     if isinstance(firings_old, str):
         firings_old_filepath = firings_old
         with open(firings_old, 'rb') as f:
-            firings_old = MDAReader(f).read()
+            firings_old = util.MDAReader(f).read()
     else:
         firings_old_filepath = ''
     if isinstance(firings_new, str):
         firings_new_filepath = firings_new
         with open(firings_new, 'rb') as f:
-            firings_new = MDAReader(f).read()
+            firings_new = util.MDAReader(f).read()
     else:
         firings_new_filepath = ''
 
@@ -306,10 +327,10 @@ def get_templates(*, timeseries,
     # Load files if needed
     # firings can be loaded in memory, but timeseries usually too big
     if isinstance(timeseries, str):
-        timeseries = MDAReader(open(timeseries, 'rb')) 
+        timeseries = util.MDAReader(open(timeseries, 'rb')) 
     if isinstance(firings, str):
         with open(firings, 'rb') as f:
-            firings = MDAReader(f).read()
+            firings = util.MDAReader(f).read()
 
     # Set parameters
     cluster_labels = np.unique(firings[2, :])
@@ -377,7 +398,7 @@ def plot_templates(*, timeseries=None,
     elif templates is not None:
         if isinstance(templates, str):
             with open(templates, 'rb') as f:
-                templates = MDAReader(f).read()
+                templates = util.MDAReader(f).read()
     
     # Get labels
     if labels is not None:
@@ -503,14 +524,14 @@ def curate_firings(*, firings,
     # Load files if needed
     if isinstance(firings, str):
         with open(firings, 'rb') as f:
-            firings = MDAReader(f).read()
+            firings = util.MDAReader(f).read()
     if isinstance(metrics, str):
         with open(metrics, 'r') as f:
             metrics = json.loads(f.read())
     
     # Make lists if needed
-    keep_tags = _check_list(keep_tags)
-    exclude_tags = _check_list(exclude_tags)
+    keep_tags = util._check_list(keep_tags)
+    exclude_tags = util._check_list(exclude_tags)
 
     # Get cluster metrics
     labels = np.array([c['label'] for c in metrics['clusters']])
@@ -700,10 +721,807 @@ def estimate_firing_rate(*,
                          method='kernel',
                          **kwargs):
     pass
-    
+
+
+### Dimensionality reduction ###
+class LatentModel:
+
+    def __init__(self, *, p):
+        """
+        Performs dimensionality reduction on spike counts or firing rates.
+        """
+        # Set model parameters
+        self.p = p
+
+        # Set training data placeholder
+        self.Y = None
+
+    def _check_data(self, Y):
+        # Initial training data
+        if self.Y is None:
+            if Y.ndim != 3:
+                raise SyntaxError('Training data must have three dimensions.')
+            elif (np.sum(Y, axis=(0, 2)) == 0).any():
+                warnings.warn('Training data contains a row of zeros. This may '
+                              'lead to errors fitting data.', UserWarning, 2)
+        # Test data
+        elif self.Y.shape[1] not in Y.shape:
+            raise SyntaxError('Test data does not have the proper input shape.')
+
+    def fit(self, Y, **kwargs):
+        """
+        Fits model to provided spike data.
+
+        Args:
+        - Y (ndarray, [N, q, T]): Array containing the spike information. Note that
+            it must be in the shape [# trials, # units, # time bins]. 
+        
+        Returns:
+        - self
+        """
+        # Check data format
+        self._check_data(Y)
+
+        # Data
+        self.Y = Y
+        assert Y.ndim == 3
+
+        # Shapes (for reference)
+        N = self.Y.shape[0] # number of trials
+        q = self.Y.shape[1] # number of units
+        T = self.Y.shape[2] # number of time bins
+
+        return self._fit(**kwargs)
+
+    def _fit(self, **kwargs):
+        raise NotImplementedError
+
+    def get_params(self, *params):
+        # Return all parameters if none provided
+        if len(params) == 0:
+            params = self.PARAM_NAMES
+        
+        param_dict = {}
+        for name in params:
+            if name in self.PARAM_NAMES:
+                param_dict[name] = getattr(self, '_'+name)
+            else:
+                raise ValueError('Unknown parameter \'%s\'.')
+        
+        return param_dict
+
+    def set_params(self, **params):
+        for k, v in params.items():
+            if k in self.PARAM_NAMES:
+                setattr(self, '_'+k, v)
+            else:
+                raise ValueError('Unknown parameter \'%s\'.')
+        
+        return self
+
+    def project(self, Y, **kwargs):
+        # Check data format
+        self._check_data(Y)
+
+        return self._project(Y, **kwargs)
+
+    def _project(self, Y, **kwargs):
+        raise NotImplementedError
+
+    def backproject(self, Y=None, X=None, **kwargs):
+        if X is None:
+            X = self.project(Y, **kwargs)
+        
+        return self._backproject(X, **kwargs)
+        
+    def _backproject(self, X, **kwargs):
+        raise NotImplementedError
+
+    def error(self, Y, err_type, p_range=None, verbose=False, **kwargs):
+        # Shapes
+        N = Y.shape[0] # number of trials
+        q = Y.shape[1] # number of units
+        T = Y.shape[2] # number of time bins
+        
+        # Setup
+        if p_range is None:
+            p_range = np.arange(1, q)
+        error = np.zeros(len(p_range))
+
+        # Iterate over all trials
+        for n in range(N):
+            # Set iterator
+            if verbose:
+                print('Calculating error for trial %d of %d...' % (n+1, N))
+                it = tqdm_notebook(p_range)
+            else:
+                it = p_range
+
+            # Separate train (-n) and test (n) data
+            Y_train = np.delete(Y, n, axis=0) # remove nth trial
+            Y_test = Y[n].reshape([q, -1], order='F')
+
+            # Calculate predictions for dimensionality p
+            for i, p_i in enumerate(it):
+                # Calculate parameters and projections for latent space
+                self.p = p_i
+                self.fit(Y_train, **kwargs)
+
+                # Back-projection error
+                if err_type.lower() == 'bp':
+                    # Calculate back-projection on test trial
+                    Y_test_hat = self.backproject(Y_test)
+
+                    # Calculate error
+                    error[i] += np.sum((Y_test_hat - Y_test)**2)
+                
+                # Leave-out-neuron prediction error
+                elif err_type.lower() == 'loocv':
+                    # Cache parameters
+                    cache = {name: np.copy(getattr(self, '_'+name)) for name in self.PARAM_NAMES}
+
+                    # Calculate prediction for neuron j
+                    for j in range(q):
+                        # Set input with jth neuron left out
+                        for name, param in cache.items():
+                            dim = np.argwhere(np.array(param.shape) == q).flatten()
+                            for k, d in enumerate(dim):
+                                param = np.delete(param, j, axis=d)
+                            setattr(self, '_'+name, param)
+
+                        # Calculate backprojections with jth neuron left out
+                        Y_test_hat = self.backproject(Y_test[idx, :])
+
+                        # Calculate error
+                        error[i] += np.sum((Y_test_hat[j] - Y_test[j])**2)
+
+        # Normalize error
+        error = (1.0/(Y.size)) * (error**0.5)
+
+        return error
+
+class PCA(LatentModel):
+
+    PARAM_NAMES = ['U', 'lam', 'd']
+
+    def __init__(self, *, p):
+        # Initialize base class
+        super().__init__(p=p)
+        
+        # Set parameter placeholders
+        for name in self.PARAM_NAMES:
+            if ('_' + name) not in self.__dict__:
+                setattr(self, '_' + name, None)
+
+    def _fit(self):
+        """
+        """
+        # Shapes
+        N = self.Y.shape[0] # number of trials
+        q = self.Y.shape[1] # number of units
+        T = self.Y.shape[2] # number of time bins
+
+        # Unroll into single series
+        Y_rs = self.Y.transpose([1, 2, 0]).reshape([q, -1], order='F')
+
+        # Calculate eigenvectors of sample covariance matrix
+        self._d = np.mean(Y_rs, axis=1, keepdims=True) # sample mean
+        S = 1/(N*T) * (Y_rs - self._d).dot((Y_rs - self._d).T) # sample covariance
+        lam, U = np.linalg.eig(S) # eigendecomposition of sample covariance
+        
+        # Sort by eigenvalues
+        sort_idx = np.argsort(lam)[::-1]
+        self._lam = lam[sort_idx]
+        self._U = U[:, sort_idx]
+
+        # Keep first p dimensions
+        #self._lam = lam[:self.p]
+        #self._U = U[:, :self.p]
+
+        return self
+
+    def _project(self, Y_test, **kwargs):
+        """
+        """
+        # Calculate projections
+        X = np.matmul(self._U[:, :self.p].T, (Y_test - self._d)) # preserves dimension order
+
+        return X
+
+    def _backproject(self, X):
+        return np.matmul(self._U[:, :self.p], X) + self._d
+
+    def update_p(self, p):
+        """
+        This avoids having to perform redundant calculations to get different
+        number of latent dimensions for the same training data.
+        """
+        self.p = p
+
+    def error(self, Y, err_type, p_range=None, verbose=False, **kwargs):
+        """
+        PCA has some features that allows faster error algorithms to be
+        implemented, so we will overwrite the generic error function.
+        """
+        # Shapes
+        N = Y.shape[0] # number of trials
+        q = Y.shape[1] # number of units
+        T = Y.shape[2] # number of time bins
+        
+        # Setup
+        if p_range is None:
+            p_range = np.arange(1, q)
+        error = np.zeros(len(p_range))
+
+        # Iterate over all trials
+        for n in range(N):
+            if verbose:
+                print('Calculating error for trial %d of %d...' % (n+1, N))
+                it = tqdm_notebook(p_range)
+            else:
+                it = p_range
+
+            # Separate train (-n) and test (n) data
+            Y_train = np.delete(Y, n, axis=0) # remove nth trial
+            Y_test = Y[n].reshape([q, -1], order='F')
+
+            # Calculate PCA parameters
+            self.fit(Y_train, **kwargs)
+            
+            # Calculate predictions for dimensionality p
+            for i, p_i in enumerate(it):
+                # Set parameter space p_i
+                self.p = p_i
+
+                # Back-projection error
+                if err_type.lower() == 'bp':
+                    # Calculate back-projection on test trial
+                    Y_test_hat = self.backproject(Y_test)
+
+                    # Calculate error
+                    error[i] += np.sum((Y_test_hat - Y_test)**2)
+
+                # Leave-out-neuron prediction error
+                elif err_type.lower() == 'loocv':
+                    # Vectorized form
+                    U_p = self._U[:, :self.p] # aesthetics
+                    err = (np.eye(q) - U_p.dot(U_p.T) + np.eye(q)*(U_p.dot(U_p.T))).dot(Y_test - self._d)
+                    error[i] += np.sum(err**2)
+
+        # Normalize error
+        error = (1/(Y.size)) * (error**0.5)
+
+        return error
+
+class PPCA(LatentModel):
+
+    PARAM_NAMES = ['C', 'd', 's', 'U', 'D', 'VT']
+
+    def __init__(self, *, p):
+        # Initialize base class
+        super().__init__(p=p)
+        
+        # Set parameter placeholders
+        for name in self.PARAM_NAMES:
+            if ('_' + name) not in self.__dict__:
+                setattr(self, '_' + name, None)
+
+    def _fit(self,
+             C_init=None, 
+             d_init=None, 
+             s_init=0.5, 
+             EM_steps=500,
+             verbose=False,
+             **kwargs):
+        """
+        """
+        # Shapes
+        N = self.Y.shape[0] # number of trials
+        q = self.Y.shape[1] # number of units
+        T = self.Y.shape[2] # number of time bins
+
+        # Unroll into single series
+        Y_rs = self.Y.transpose([1, 2, 0]).reshape([q, -1], order='F')
+
+        # Set initial values
+        if C_init is None:
+            self._C = np.random.rand(q, self.p)
+        else:
+            self._C = C_init
+        if d_init is None:
+            self._d = np.mean(Y_rs, axis=1, keepdims=True)
+        else:
+            self._d = d_init
+        self._s = np.array(s_init)
+
+        # Set progress bar
+        if verbose:
+            it = tqdm_notebook(range(EM_steps))
+        else:
+            it = range(EM_steps)
+
+        # EM algorithm
+        cache_names = ['_' + name for name in self.PARAM_NAMES 
+                       if getattr(self, '_' + name) is not None]
+        for i in it:
+            # Cache parameters
+            cache = [np.copy(getattr(self, name)) for name in cache_names]
+
+            # E-step: calculate E(x), E(xx^T) ~ new P(x|y)
+            # (which maximizes expected joint probability wrt distribution of y)
+            B = self._s * np.eye(self.p) + self._C.T.dot(self._C) # p x p
+            A_inv = (1/self._s * np.eye(q)) \
+                    - (1/self._s * self._C.dot(np.linalg.inv(B).dot(self._C.T))) # matrix inversion lemma
+            E_x = self._C.T.dot(A_inv).dot(Y_rs - self._d) # matrix form
+            sum_E_xxT = (np.eye(self.p) - self._C.T.dot(A_inv.dot(self._C)))*(N*T) \
+                        + E_x.dot(E_x.T) # summation form
+            
+            # M-step: update C and R to maximize likelihood
+            # (which maximizes expected joint probability wrt parameters)
+            self._C = ((Y_rs - self._d).dot(E_x.T)).dot(np.linalg.inv(sum_E_xxT))
+            self._s = 1.0/(q*N*T) * np.trace( (Y_rs - self._d).dot((Y_rs - self._d).T) 
+                                              - self._C.dot(E_x.dot((Y_rs - self._d).T)) )
+
+            # Check for convergence
+            if all([np.isclose(getattr(self, name), attr_old).all() 
+                    for name, attr_old in zip(cache_names, cache)]):
+                if verbose:
+                    print('Converged after %d iterations.' % (i+1))
+                break
+            
+        # Transform to othornormal space
+        self._U, D, self._VT = np.linalg.svd(self._C, full_matrices=False)
+        self._D = np.diag(D)
+
+        return self
+        
+    def _project(self, Y_test, orthonormal=True, **kwargs):
+        """
+        """
+        # Shapes
+        q = self._C.shape[0]
+
+        # Calculate projections of X | Y
+        # NOTE: matmul must be used instead of dot because Y.ndim > 2.
+        # Additionally, shape is [N, q, T] because matmul broadcasts
+        # over matrices residing in last two dimensions.
+        B = self._s * np.eye(self.p) + self._C.T.dot(self._C) # p x p
+        A_inv = (1.0/self._s * np.eye(q)) \
+                - (1.0/self._s * self._C.dot(np.linalg.inv(B).dot(self._C.T))) # matrix inversion lemma
+        X = np.matmul(self._C.T, np.matmul(A_inv, (Y_test - self._d))) # matrix form
+
+        # Linearly tranform x into othornomal space U
+        if orthonormal:
+            X = np.matmul(self._D, np.matmul(self._VT, X))
+        
+        return X
+
+    def _backproject(self, X, orthonormal=True, **kwargs):
+        if orthonormal:
+            return np.matmul(self._U, X) + self._d
+        else:
+            return np.matmul(self._C, X) + self._d
 
     
+class FA(LatentModel):
 
+    PARAM_NAMES = ['C', 'd', 'R', 'U', 'D', 'VT']
+
+    def __init__(self, *, p):
+        # Initialize base class
+        super().__init__(p=p)
+        
+        # Set parameter placeholders
+        for name in self.PARAM_NAMES:
+            if ('_' + name) not in self.__dict__:
+                setattr(self, '_' + name, None)
+
+    def _fit(self,
+             C_init=None, 
+             d_init=None, 
+             R_init=None, 
+             EM_steps=500,
+             verbose=False,
+             **kwargs):
+        """
+        """
+        # Shapes
+        N = self.Y.shape[0] # number of trials
+        q = self.Y.shape[1] # number of units
+        T = self.Y.shape[2] # number of time bins
+
+        # Unroll into single series
+        Y_rs = self.Y.transpose([1, 2, 0]).reshape([q, -1], order='F')
+
+        # Set initial values
+        if C_init is None:
+            self._C = np.random.rand(q, self.p)
+        else:
+            self._C = C_init
+        if d_init is None:
+            self._d = np.mean(Y_rs, axis=1, keepdims=True)
+        else:
+            self._d = d_init
+        if R_init is None:
+            self._R = np.diag(np.random.rand(q))
+        else:
+            self._R = R_init
+
+        # Set progress bar
+        if verbose:
+            it = tqdm_notebook(range(EM_steps))
+        else:
+            it = range(EM_steps)
+
+        # EM algorithm
+        cache_names = ['_' + name for name in self.PARAM_NAMES 
+                       if getattr(self, '_' + name) is not None]
+        for i in it:
+            # Cache parameters
+            cache = [np.copy(getattr(self, name)) for name in cache_names]
+
+            # E-step: calculate E(x), E(xx^T) ~ new P(x|y)
+            # (which maximizes expected joint probability wrt distribution of y)
+            R_inv = np.diag(1.0/self._R[np.arange(len(self._R)), np.arange(len(self._R))])
+            B = np.eye(self.p) + self._C.T.dot(R_inv.dot(self._C)) # p x p
+            A_inv = R_inv - R_inv.dot(self._C.dot(np.linalg.inv(B).dot(self._C.T.dot(R_inv)))) # matrix inversion lemma
+            E_x = self._C.T.dot(A_inv).dot(Y_rs - self._d) # matrix form
+            sum_E_xxT = ( (np.eye(self.p) - self._C.T.dot(A_inv.dot(self._C)))*(N*T) 
+                          + E_x.dot(E_x.T) ) # summation form
+
+            # M-step: update C and R to maximize likelihood
+            # (which maximizes expected joint probability wrt parameters)
+            self._C = ((Y_rs - self._d).dot(E_x.T)).dot(np.linalg.inv(sum_E_xxT))
+            self._R = 1.0/(N*T) * np.eye(q) * ( (Y_rs - self._d).dot((Y_rs - self._d).T) 
+                                                - self._C.dot(E_x.dot((Y_rs - self._d).T)) )
+
+            # Check for convergence
+            if all([np.isclose(getattr(self, name), attr_old).all() 
+                    for name, attr_old in zip(cache_names, cache)]):
+                if verbose:
+                    print('Converged after %d iterations.' % (i+1))
+                break
+            
+        # Transform to othornormal space
+        self._U, D, self._VT = np.linalg.svd(self._C, full_matrices=False)
+        self._D = np.diag(D)
+
+        return self
+        
+    def _project(self, Y_test, orthonormal=True, **kwargs):
+        """
+        """
+        # Shapes
+        q = self._C.shape[0]
+
+        # Calculate projections of X | Y
+        R_inv = np.diag(1.0/self._R[np.arange(len(self._R)), np.arange(len(self._R))])
+        B = np.eye(self.p) + self._C.T.dot(R_inv.dot(self._C)) # p x p
+        A_inv = R_inv - R_inv.dot(self._C.dot(np.linalg.inv(B).dot(self._C.T.dot(R_inv)))) # matrix inversion lemma
+        X = np.matmul(self._C.T, np.matmul(A_inv, (Y_test - self._d)))
+
+        # Linearly tranform x into othornomal space U
+        if orthonormal:
+            X = np.matmul(self._D, np.matmul(self._VT, X))
+        
+        return X
+
+    def _backproject(self, X, orthnormal=True, **kwargs):
+        if orthonormal:
+            return np.matmul(self._U, X) + self._d
+        else:
+            return np.matmul(self._C, X) + self._d
+
+class GPFA(LatentModel):
+
+    PARAM_NAMES = ['C', 'd', 'R', 'K', 'sigma_f', 'sigma_n', 'tau', 'U', 'D', 'VT']
+
+    def __init__(self, *,
+                 p,
+                 sigma_n=1e-3):
+        # Initialize base class
+        super().__init__(p=p)
+
+        # Initialize data-independent GP parameters
+        self._sigma_n = (sigma_n * np.ones(self.p))**0.5 # variance
+        self._sigma_f = (1.0 - self._sigma_n**2)**0.5
+        
+        # Set parameter placeholders
+        for name in self.PARAM_NAMES:
+            if ('_' + name) not in self.__dict__:
+                setattr(self, '_' + name, None)
+        
+
+    def _fit(self,
+             dt_bin=1.0,
+             C_init=None, 
+             d_init=None, 
+             R_init=None,
+             tau_0=1.0,
+             EM_steps=500,
+             alpha = 1e-8,
+             verbose=False):
+
+        # Shapes
+        N = self.Y.shape[0]
+        q = self.Y.shape[1]
+        T = self.Y.shape[2]
+
+        # Initialize FA parameters
+        if verbose:
+            print('Fitting initial FA parameters...')
+        fa = FA(p=self.p)
+        fa.fit(self.Y,
+               C_init=C_init,
+               d_init=d_init,
+               R_init=R_init,
+               EM_steps=EM_steps,
+               verbose=verbose)
+        params = fa.get_params('C', 'd', 'R')
+        self._C, self._d, self._R = params['C'], params['d'], params['R']
+        fa = None # release memory
+
+        # Precompute matrices for GP updates
+        self._T_1 = np.ones([T, T]) * np.arange(1, T+1)[:, np.newaxis]
+        self._T_2 = np.ones([T, T]) * np.arange(1, T+1)
+
+        # Initialize data-dependent GP parameters
+        self._tau = tau_0/dt_bin * np.ones(self.p) # timescales
+        self._update_K() # squared exponential covariance matrix
+
+        # Set progress bar
+        if verbose:
+            it = tqdm_notebook(range(EM_steps))
+            print('Running joint GPFA EM algorithm...')
+        else:
+            it = range(EM_steps)
+        
+        # EM algorithm
+        cache_names = ['_' + name for name in self.PARAM_NAMES 
+                       if getattr(self, '_' + name) is not None]
+        for i in it: 
+            # Cache parameters
+            cache = [np.copy(getattr(self, name)) for name in cache_names]
+
+            # Optimize FA parameters via EM algorithm
+            E_xt, E_xtxtT, E_xiTxi = self._expectation(self.Y)
+            self._update_Cd(E_xt, E_xtxtT)
+            self._update_R(E_xt)
+            
+            # Optimize GP parameters via gradient descent
+            self._fit_GP_gd(E_xiTxi, 
+                            alpha=alpha, 
+                            max_steps=10000, 
+                            epsilon=1e-5)
+
+            # Check for convergence
+            if all([np.isclose(getattr(self, name), attr_old).all() 
+                    for name, attr_old in zip(cache_names, cache)]):
+                if verbose:
+                    print('Converged after %d iterations.' % (i+1))
+                break
+
+        # Transform to othornormal space
+        self._U, D, self._VT = np.linalg.svd(self._C, full_matrices=False)
+        self._D = np.diag(D)
+
+        return self
+
+    # GPFA EM functions
+    def _expectation(self, Y):
+        # Shapes
+        p = self.p # number of latent dimensions
+        N = Y.shape[0] # number of trials
+        q = Y.shape[1] # number of units
+        T = Y.shape[2] # number of time bins
+
+        # Convert parameters to concatenated and block diagonal forms
+        C_bar = np.kron(np.eye(T), self._C)
+        R_bar = np.kron(np.eye(T), self._R)
+        d_bar = (self._d * np.ones([q, T])).reshape([-1, 1], order='F')
+        K_bar = np.zeros([p*T, p*T])
+        for tt_1 in range(T):
+            for tt_2 in range(T):
+                K_bar[p*tt_1:p*(tt_1+1), p*tt_2:p*(tt_2+1)] = np.eye(p) * self._K[tt_1, tt_2, :]
+
+        # Precompute matrices needed for expectation
+        K_bar_inv = np.linalg.inv(K_bar) # TODO: speed this up?
+        R_bar_inv = np.kron(np.eye(T), np.linalg.inv(self._R))
+        B_inv = np.linalg.inv(K_bar_inv + C_bar.T.dot(R_bar_inv.dot(C_bar)))
+        A_inv = R_bar_inv - R_bar_inv.dot(C_bar.dot(B_inv.dot(C_bar.T.dot(R_bar_inv))))
+        #A = C_bar.dot(K_bar.dot(C_bar.T)) + R_bar
+        #A_inv = np.linalg.inv(A)
+        M = K_bar.dot(C_bar.T.dot(A_inv)) # for computing E_x
+        Cov_x = K_bar - K_bar.dot(C_bar.T.dot(A_inv.dot(C_bar.dot(K_bar)))) # covariance
+
+        # Placeholders
+        E_xt = np.zeros([N, p, T])
+        E_xtxtT = np.zeros([N, p, p, T])
+        E_xiTxi = np.zeros([N, T, T, p])
+
+        for n in range(N):
+            # Reshape data into unrolled vector
+            y_bar = Y[n].reshape([-1, 1], order='F')
+            
+            # Compute expectation of neural trajectory
+            E_x = M.dot(y_bar - d_bar)
+            E_xxT = Cov_x + E_x.dot(E_x.T)
+            
+            # Slice into three desired expectations for readability
+            E_xt[n, :, :] = np.reshape(E_x, [p, T], order='F')
+            for tt in range(T):
+                E_xtxtT[n, :, :, tt] = E_xxT[p*tt:p*(tt+1), p*tt:p*(tt+1)]
+            for j in range(p):
+                idx = np.meshgrid(*[np.arange(j, p*T, p)]*2, indexing='ij')
+                E_xiTxi[n, :, :, j] = E_xxT[idx]
+        
+        return E_xt, E_xtxtT, E_xiTxi
+
+    def _update_Cd(self, E_xt, E_xtxtT):
+        # Shapes
+        p = self.p # number of latent dimensions
+        N = self.Y.shape[0] # number of trials
+        q = self.Y.shape[1] # number of units
+        T = self.Y.shape[2] # number of time bins
+
+        # Placeholder
+        self._C, self._d = None, None # release memory
+        Cd = np.zeros([q, p+1])
+
+        # Iterate over all trials
+        for n in range(N):
+            A = np.hstack([self.Y[n].dot(E_xt[n].T), np.sum(self.Y[n], axis=1, keepdims=True)])
+            B = np.block([
+                [np.sum(E_xtxtT[n], axis=2), np.sum(E_xt[n], axis=1, keepdims=True)],
+                [np.sum(E_xt[n], axis=1, keepdims=True).T,  T                  ]
+            ])
+            Cd += 1/N * A.dot(np.linalg.inv(B))
+        
+        # Set new parameters
+        self._C = Cd[:, :-1]
+        self._d = Cd[:, -1][:, np.newaxis]
     
+    def _update_R(self, E_xt):
+        # Shapes
+        N = self.Y.shape[0] # number of trials
+        q = self.Y.shape[1] # number of units
+        T = self.Y.shape[2] # number of time bins
 
-     
+        # Placeholder
+        self._R = None # release memory
+        R = np.zeros([q, q])
+
+        # Iterate overa all trials
+        for n in range(N):
+            R += 1/(N*T) * np.eye(q) * ( (self.Y[n] - self._d).dot((self.Y[n] - self._d).T) 
+                                         - (self.Y[n].dot(E_xt[n].T)).dot(self._C.T) )
+
+        # Set new parameters
+        self._R = R
+
+    def _update_K(self):
+        # Shapes
+        p = self.p
+        T = self.Y.shape[2]
+
+        # Placeholder
+        self._K = None # release memory
+        K = np.zeros([T, T, p])
+
+        # Calculate square exponential covariance for each latent dimension
+        for i in range(p):
+            logits = -(self._T_1 - self._T_2)**2 / (2 * self._tau[i]**2)
+            logits[logits < -100] = -np.inf
+            K[:, :, i] = self._sigma_f[i]**2 * np.exp(logits) + self._sigma_n[i]**2 * np.eye(T)
+
+        # Update parameters
+        self._K = K
+
+    # GPFA GP gradient descent functions
+    def _fit_GP_gd(self, E_xiTxi, alpha=1e-5, max_steps=10000, epsilon=1e-5):
+        # Shapes
+        p = self.p # number of latent dimensions
+        N = self.Y.shape[0] # number of trials
+        q = self.Y.shape[1] # number of units
+        T = self.Y.shape[2] # number of time bins
+
+        # Placeholders
+        tau_new = np.zeros(p)
+
+        for j in range(p):
+            # Initialize values
+            tau_i = self._tau[j]
+
+            for step in range(max_steps):
+                # Save old tau
+                tau_old_i = tau_i
+                
+                # Update new K_i
+                logits = -(self._T_1 - self._T_2)**2 / (2 * tau_i**2)
+                logits[logits < -100] = -np.inf
+                K_i = self._sigma_f[j]**2 * np.exp(logits) + self._sigma_n[j]**2 * np.eye(T)
+                
+                # Calculate expensive matrices
+                K_inv = np.linalg.inv(K_i)
+                
+                # Update tau via gradient ascent
+                dKdtau = N*(self._sigma_f[j]**2 * (self._T_1 - self._T_2)**2 / tau_i**3 * np.exp(logits))
+                dEdK = np.zeros(K_i.shape)
+                for n in range(N):
+                    dEdK += 0.5 * (-K_inv + K_inv.dot(E_xiTxi[n, :, :, j].dot(K_inv)))
+                dEdtau = np.trace(dEdK.T.dot(dKdtau))
+                dEdlog_tau = dEdtau * tau_i # log transformation
+                log_tau = np.log(tau_i) + alpha * dEdlog_tau # gradient ascent update
+                tau_i = np.exp(log_tau) # inverse log transformation
+                
+                # Break if step size sufficiently small
+                if abs(tau_old_i - tau_i) < epsilon:
+                    break
+            
+            # Save new tau
+            tau_new[j] = tau_i
+
+        # Update parameters
+        self._tau = tau_new
+        self._update_K()
+
+    def _fit_GP_auto(self, sigma_f, sigma_n, E_xiTxi, use_grad=True):
+        logE = lambda log_tau: _neg_logE_XY(log_tau, sigma_f, sigma_n, E_xiTxi, return_grad=use_grad)
+        res = minimize(logE, np.log(tau), jac=use_grad)
+        tau_max = np.exp(res.x)
+        
+        return tau_max, _gpfa_update_K(sigma_f, sigma_n, tau_max)
+
+    def _neg_logE_XY(log_tau, sigma_f, sigma_n, E_xiTxi, return_grad=False):
+        # Inverse log transformation
+        tau_i = np.exp(log_tau)
+        
+        # Update new K_i
+        K_i = update_K(sigma_f, sigma_n, tau_i)
+        
+        # Calculate expensive matrices
+        K_inv = np.linalg.inv(K_i)
+        K_det = np.linalg.det(K_i)
+        
+        # Calculate expected log joint probability
+        # that is *only* dependent on terms dependent on tau (i.e. K)
+        logE_XY = -0.5*N*T*K_det
+        for n in range(N):
+            for t in range(T):
+                logE_XY += -0.5*np.trace(K_inv.dot(E_xiTxi[n]))
+        
+        # Calculate gradient
+        logits = -(t_1 - t_2)**2 / (2 * tau_i**2)
+        logits[logits < -100] = -np.inf
+        dKdtau = (sigma_f**2 * (t_1 - t_2)**2 / tau_i**3 * np.exp(logits))*N
+        dlogEdK = np.zeros(K_i.shape)
+        for n in range(N):
+            dlogEdK += 0.5 * (-K_inv + K_inv.dot(E_xiTxi[n].dot(K_inv)))
+        dlogEdtau = np.trace(dlogEdK.T.dot(dKdtau))
+        dlogEdlog_tau = dlogEdtau * tau_i # log transformation
+        
+        if return_grad:
+            return -logE_XY, -dlogEdlog_tau
+        else:
+            return -logE_XY
+
+    def _project(self, Y, orthonormal=True):
+        """
+        """
+        # Assert correct shape
+        assert Y.ndim == 3
+
+        # Calculate projections of X | Y for each trial
+        E_xt, _, _ = self._expectation(Y)
+
+        # Linearly tranform x into othornomal space U
+        if orthonormal:
+            E_xt = np.matmul(self._D, np.matmul(self._VT, E_xt))
+        
+        return E_xt
+
+    def _backproject(self, X, orthnormal=True):
+        if orthonormal:
+            return np.matmul(self._U, X) + self._d
+        else:
+            return np.matmul(self._C, X) + self._d
