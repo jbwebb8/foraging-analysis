@@ -686,7 +686,7 @@ def get_peristimulus_data(data,
                           window=[-1.0, 1.0], 
                           fs=1.0):
     # Get traces corresponding to stimulus windows
-    idx_window = np.arange(round(window[0]*fs), round(window[1]*fs))
+    idx_window = np.arange(round(window[0]*fs), round(window[1]*fs)).astype(np.int64)
     data_win = np.zeros([t_stimulus.shape[0], idx_window.size])
     for i in range(t_stimulus.shape[0]):
         # Get trace around stimulus
