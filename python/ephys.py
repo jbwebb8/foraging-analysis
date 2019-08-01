@@ -1069,7 +1069,7 @@ class PPCA(LatentModel):
                     print('Converged after %d iterations.' % (i+1))
                 break
             
-        # Transform to othornormal space
+        # Transform to orthonormal space
         self._U, D, self._VT = np.linalg.svd(self._C, full_matrices=False)
         self._D = np.diag(D)
 
@@ -1090,7 +1090,7 @@ class PPCA(LatentModel):
                 - (1.0/self._s * self._C.dot(np.linalg.inv(B).dot(self._C.T))) # matrix inversion lemma
         X = np.matmul(self._C.T, np.matmul(A_inv, (Y_test - self._d))) # matrix form
 
-        # Linearly tranform x into othornomal space U
+        # Linearly tranform x into orthonomal space U
         if orthonormal:
             X = np.matmul(self._D, np.matmul(self._VT, X))
         
@@ -1182,7 +1182,7 @@ class FA(LatentModel):
                     print('Converged after %d iterations.' % (i+1))
                 break
             
-        # Transform to othornormal space
+        # Transform to orthonormal space
         self._U, D, self._VT = np.linalg.svd(self._C, full_matrices=False)
         self._D = np.diag(D)
 
@@ -1301,7 +1301,7 @@ class GPFA(LatentModel):
                     print('Converged after %d iterations.' % (i+1))
                 break
 
-        # Transform to othornormal space
+        # Transform to orthonormal space
         self._U, D, self._VT = np.linalg.svd(self._C, full_matrices=False)
         self._D = np.diag(D)
 
