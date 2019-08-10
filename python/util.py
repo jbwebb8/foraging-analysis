@@ -686,15 +686,18 @@ def get_peristimulus_data(data,
                           window=[-1.0, 1.0], 
                           fs=1.0):
     # Get traces corresponding to stimulus windows
-    idx_window = np.arange(round(window[0]*fs), round(window[1]*fs))
-    data_win = np.zeros([t_stimulus.shape[0], idx_window.size])
+    idx_window = np.arange(round(window[0]*fs), round(window[1]*fs)).astype(np.int64)
+    data_win =  []
     for i in range(t_stimulus.shape[0]):
         # Get trace around stimulus
         idx_center = np.squeeze(np.argwhere(np.isclose(t_data, t_stimulus[i], atol=1.0/fs)))
-        if idx_center.size > 1:
+        if idx_center.size == 0:
+            continue
+        elif idx_center.size > 1:
             idx_center = idx_center[idx_center.size//2]
         idx_i = idx_window + idx_center
-        data_win[i] = data[idx_i]
+        data_win.append(data[idx_i])
+    data_win = np.array(data_win)
 
     # Get corresponding timestamps relative to window
     t_window = idx_window / fs

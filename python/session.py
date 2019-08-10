@@ -16,10 +16,11 @@ class Session:
 
     WHEEL_CIRCUMFERENCE = 60 # cm
 
-    def __init__(self, filename):
+    def __init__(self, filename, pupil_filepath=None):
         # Get filename
         self.filename = filename
         self.f = h5py.File(filename)
+        self.pupil_filepath = pupil_filepath
 
         # Set global attributes
         match = re.search('_d[0-9]+[a-z]*_', filename, re.IGNORECASE)
@@ -28,11 +29,11 @@ class Session:
         if match is not None:
             day = day[:match.span()[0]]
         self.day = int(day)
-        self.data_names = ['sound', 'motor', 'lick', 'fs', 'wheel_time', 
+        self.data_names = ['sound', 'motor', 'lick', 'cam', 'fs', 'wheel_time',
                            'wheel_speed', 'wheel_position', 'dt_patch']
         self.var_names = ['T', 't_patch', 'in_patch', 't_stop', 's_var',
                           'fs_s', 't_s', 't_motor', 'dt_motor', 'n_motor_rem',
-                          't_lick', 't_wheel', 'v_smooth']
+                          't_lick', 't_wheel', 'v_smooth', 'd_pupil', 't_pupil']
         self.settings = {}
         struct = self.f['Settings']['Property']
 
@@ -112,6 +113,8 @@ class Session:
             return self.f['UntitledLick' + chamber_number]['Data'][0, :]
         elif name == 'motor':
             return self.f['UntitledMotor' + chamber_number]['Data'][0, :]
+        elif name ==  'cam':
+            return self.f['UntitledCam' + chamber_number]['Data'][0, :]
         elif name == 'fs':
             return 1.0 / self.f['UntitledSound' + chamber_number]['Property']['wf_increment'][0, 0]
         elif name == 'wheel_speed':
@@ -161,6 +164,10 @@ class Session:
             return self._get_wheel_times()
         elif name == 'v_smooth':
             return self._get_smoothed_velocity()
+        elif name == 'd_pupil':
+            return self._get_pupil_size()
+        elif name == 't_pupil':
+            return self._get_pupil_times()
         else:
             raise SyntaxError('Unknown variable name \'%s\'.' % name)
         
@@ -693,6 +700,65 @@ class Session:
             if k in load_keys and not k in ignore_keys:
                 self.__dict__[k] = v # avoids overwriting h5py.File
         f.close()
+
+    def get_pupil_times(self, filepath=None):
+        # Set pupil filepath if provided
+        self.pupil_filepath = filepath
+
+        # Requirements
+        req_vars = ['t_pupil']
+        self._check_attributes(var_names=req_vars)
+
+        return self.vars['t_pupil']
+
+    def get_pupil_size(self, filepath=None):
+        # Set pupil filepath if provided
+        self.pupil_filepath = filepath
+
+        # Requirements
+        req_vars = ['d_pupil']
+        self._check_attributes(var_names=req_vars)
+
+        return self.vars['d_pupil']
+
+    def _get_pupil_times(self):
+        # Requirements
+        req_data = ['cam', 'fs']
+        req_vars = ['d_pupil']
+        self._check_attributes(data_names=req_data, var_names=req_vars)
+
+        # Determine threshold crossings
+        cam_sync = self.data['cam']
+        _, idx_sync, _ = self._find_threshold_crossings(cam_sync, thresh=2.5)
+
+        # Convert indices to timestamps
+        t_labview = np.arange(cam_sync.shape[0]) / self.data['fs']
+        t_cam = t_labview[idx_sync][-self.vars['d_pupil'].shape[0]:] # drop first x pulses
+
+        return t_cam
+
+    def _get_pupil_size(self):
+        # Check pupil filepath
+        if self.pupil_filepath is None:
+            raise SyntaxError('pupil_filepath not set. Please provide keyword '
+                              'argument if using get_pupil_size() or set '
+                              'pupil_filepath attribute.')
+
+        # Load raw data
+        with h5py.File(self.pupil_filepath) as f:
+            pupil = f['eyedata']['block0_values'][:, 0]
+
+        # Find frames with error (size 0 or NaN)
+        a = np.logical_or(pupil == 0.0, np.isnan(pupil)) # error indices
+        b = ~a # no-error indices
+        a = np.argwhere(a).flatten()
+        b = np.argwhere(b).flatten()
+
+        # Set error frames to nearest neighbor with correct value
+        idx_nn = b[np.argmin(np.abs(a[:, np.newaxis] - b[np.newaxis, :]), axis=1)]
+        pupil[a] = pupil[idx_nn]
+
+        return pupil
 
 
 class FreeSession(Session):
