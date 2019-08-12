@@ -1,13 +1,17 @@
 ### Functions for future ephys-analysis repo ###
+# General imports
 import json
 import warnings
 import time
-import math
+from tqdm import tqdm_notebook
+
+# Plotting tools
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1.anchored_artists import AnchoredSizeBar
-from tqdm import tqdm_notebook
-import util
 
+# Numerical analysis
+import math
+from scipy.optimize import Bounds, minimize # Poisson
 import numpy as np
 # NOTE: Currently cupy does not implement a mirror of several required numpy
 # functions, including np.block (GPFA), np.delete (error), np.linalg.eig (PCA),
@@ -19,12 +23,16 @@ import numpy as np
 #    import numpy as np
 #    print('Error importing cupy. Defaulting to numpy.')
 
+# MountainSort
 try:
     from mountainlab_pytools.mdaio import writemda64
     from mountainlab_pytools import mlproc as mlp
 except ModuleNotFoundError as e:
     print('mountainlab_pytools module not installed. Some functions'
           ' from the ephys package may not be available.')
+
+# Custom modules
+import util
 
 
 ### MountainSort functions ###
@@ -1525,3 +1533,206 @@ class GPFA(LatentModel):
             return np.matmul(self._U, X) + self._d
         else:
             return np.matmul(self._C, X) + self._d
+
+
+### Generative models ###
+class Poisson:
+    
+    def __init__(self, lam, Lam=None, homogeneous=True):
+        """
+        Creates Poisson distribution model.
+
+        Args:
+        - lam: The rate parameter that characterizes a Poisson distribution.
+            If creating a homogeneous model, lam is a constant. Otherwise,
+            lam is a function that takes time as input and returns lambda.
+        - Lam: The integral of the rate parameter function for a nonhomogeneous
+            Poisson process. Lam should be a function that takes two inputs
+            (time t and duration s) and returns the integral of the lambda 
+            function from t to t+s.
+        - homogeneous: If true, then lam is constant, and Lam is ignored. If
+            False, then lam and Lam are expected to be functions as described.
+        """
+        self.homogeneous = homogeneous
+        if homogeneous:
+            self.lam = lambda t: lam
+            self.Lam = lambda t, s: lam*s
+        elif Lam is not None:
+            self.lam = lam # function of (t)
+            self.Lam = Lam # function of (t, s)
+        else:
+            raise ValueError('Lambda(t,s) must be provided for non-homogeneous processes.')
+        
+    def _array(self, a):
+        """Ensures object is a numpy array"""
+        if not isinstance(a, np.ndarray):
+            return np.array([a])
+        else:
+            return a
+        
+    def _cdf(self, t, t_0=None):
+        """
+        Returns cumulative probability distribution of next inter-event interval
+        at time t_0: F(t) = 1 - e^(-lam(t_0)*t). Note that this function will be
+        the same for all t for a homogeneous process, but will vary with t_0 for a 
+        non-homogeneous process.
+
+        Args:
+        - t: Duration of the inter-event interval
+        - t_0: Current time in process.
+        """
+        return 1.0 - np.exp(-self.lam(t_0)*t)
+    
+    def _inv_cdf(self, F, t_0=None):
+        """
+        Returns inverse cumulative probability distribution of next inter-event interval
+        at time t_0: t(F) = -(1/lam(t_0)) log (1 - F). Note that this function will be
+        the same for all F for a homogeneous process, but will vary with t_0 for a 
+        non-homogeneous process.
+        """
+        return -(1.0/self.lam(t_0))*np.log(1.0 - F)
+    
+    def _factorial(self, n):
+        """Returns n!"""
+        if isinstance(n, np.ndarray):
+            fact = np.zeros(n.size)
+            for i, n_i in enumerate(n):
+                fact[i] = np.prod(np.arange(max(n_i, 1))+1)
+        else:
+            fact = np.prod(np.arange(max(n_i, 1))+1)
+    
+        return fact
+    
+    def P(self, n, s, t=0):
+        """Returns probability that N(s) = n""" 
+        Lam = self.Lam(t, s)
+        return np.exp(-Lam)*(np.power(Lam, n))/self._factorial(n)
+    
+    def times(self, interevent=True, **kwargs):
+        """Returns event times sampled from Poisson distribution.
+        
+        Args:
+        - interevent: If True, return times between events. 
+            If False, return event times.
+        - **kwargs: See _interevent_times() and _event_times()
+        """
+        if interevent:
+            return self._interevent_times(**kwargs)
+        else:
+            return self._event_times(**kwargs)
+        
+    def _interevent_times(self, n=1, t_0=None, t_max=np.inf, **kwargs):
+        """
+        Returns interevent times.
+
+        Args:
+        - n: Number of interevent times to generate.
+        - t_0: Current time in process.
+        - t_max: Maximum interval between events to allow.
+
+        Returns:
+        - t: Interevent times of size n.
+        """
+        if (self.homogeneous) or (t_0 is not None):
+            F = np.random.uniform(size=n)
+            t = self._inv_cdf(F, t_0)
+            t[t > t_max] = t_max
+            return t
+        else:
+            t = self._event_times(**kwargs)
+            return np.diff(t)
+            
+    def _event_times(self, s, t=0, t_max=np.inf):
+        """
+        Returns event times in interval [t, s)
+
+        Args:
+        - s: Duration of current process to sample events.
+        - t: Start time in current process to sample events.
+        - t_max: Maximum interval between events to allow.
+        
+        Returns:
+        - t_event: Time of events in interval [t, s).
+        """
+        # Convert to arrays
+        t = self._array(t)
+        s = self._array(s)
+        
+        if self.homogeneous:
+            # No pruning if homogeneous process
+            N_s = self._events(s)
+            t_event = np.sort(np.random.uniform(low=t, high=t+s, size=N_s))
+            return t_event
+        else:
+            # Get event times with rate lambda_max
+            t_0, lam_max = self._lam_max(t=t, s=s, return_argmax=True)
+            N_s = self._events(t=t, s=s, t_0=t_0, t_max=t_max)
+            t_event = np.sort(np.random.uniform(low=t, high=t+s, size=N_s))
+            
+            # Prune drip times to generate inhomogeneous process
+            lam_t = self.lam(t_event)
+            U = np.random.uniform(size=N_s)
+            return t_event[U <= (lam_t / lam_max)]
+           
+    def _lam_max(self, s, t=0, return_argmax=False):
+        """
+        Returns the maximum rate parameter in interval [t, s).
+        """
+        neg_lam = lambda t: -self.lam(t)
+        bounds = Bounds(t, t+s)
+        soln = minimize(neg_lam, np.ones(t.shape), bounds=bounds)
+        if return_argmax:
+            return soln.x, -soln.fun
+        else:
+            return -soln.fun
+          
+    def _events(self, s, t=0, t_0=None, t_max=np.inf):
+        """
+        Returns number of events N(s) in interval [t, s) sampled from a
+        Poisson distribution by generating inter-event intervals.
+
+        Args:
+        - s: Duration of current process to sample events.
+        - t: Start time in current process to sample events.
+        - t_0: Time in current process to calculate lambda
+        - t_max: Maximum interval between events to allow. 
+
+        Returns: 
+        - n: Number of events in interval [t, s).
+        """
+        if (not self.homogeneous) and (t_0 is None):
+            raise ValueError('t_0 must be specified by non-homogeneous process.')
+
+        # Guess number of events as Poisson mean
+        mean = self.Lam(t, s)
+        chunk = max(int(mean), 1)
+        T = np.cumsum(self.times(interevent=True, n=chunk, t_0=t_0, t_max=t_max))
+        idx = np.searchsorted(T, s, side='left')
+        n = idx
+
+        # Continue sampling time until time s reached
+        while (idx == T.size):
+            T = np.cumsum(self.times(interevent=True, n=chunk, t_0=t_0, t_max=t_max)) + T[-1]
+            idx = np.searchsorted(T, s, side='left')
+            n += idx
+            
+        return n
+    
+    def events(self, s, t=0, t_max=np.inf):
+        """
+        Returns number of events N(s) in interval [t, s) sampled from a
+        Poisson distribution by generating inter-event intervals.
+
+        Args:
+        - s: Duration of current process to sample events.
+        - t: Start time in current process to sample events.
+        - t_max: Maximum interval between events to allow. 
+
+        Returns: 
+        - n: Number of events in interval [t, s).
+        """
+        if self.homogeneous:
+            return self._events(s, t_max=t_max)
+        
+        else:
+            return len(self._event_times(t=t, s=s, t_max=t_max))
