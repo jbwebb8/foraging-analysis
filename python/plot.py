@@ -297,6 +297,7 @@ class Plotter:
                   err=None,
                   labels=None,
                   metrics=None,
+                  cols=5,
                   new_fig=True,
                   **kwargs):
         
@@ -315,7 +316,6 @@ class Plotter:
 
         # Plot setup
         t = bins[:-1] + 0.5*dt_bin
-        cols = 5
         rows = (len(labels) // cols) + (len(labels) % cols > 0)
         if new_fig:
             self.create_new_figure(figsize=(15, 3*rows), rows=rows, cols=cols)
