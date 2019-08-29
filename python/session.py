@@ -10,13 +10,602 @@ import numpy as np
 from scipy.interpolate import interp1d
 from helper import smooth_waveform_variance, find_threshold, \
                    cumulative_reward, get_optimal_values, compare_patch_times
-from util import in_interval, _check_list
+from util import in_interval, _check_list, dec_to_bin_array, flatten_list
 
 class Session:
+
+    def __init__(self):
+        """
+        Generic session class for foraging behavior. Minimum required data:
+        - 
+        """
+        
+        # Set allowed data and variable names
+        self.data_names = ['motor', 'lick', 'fs', 'reward']
+        self.var_names = ['T', 't_patch', 'in_patch', 't_stop', 
+                          't_motor', 'dt_motor', 'n_motor_rem',
+                          't_lick']
+
+        # Set placeholders
+        self.data = {}
+        self.vars = {}
+
+    @property
+    def n_patches(self):
+        """
+        Returns number of analyzable patch-interpatch segments
+        during session.
+        """
+        # Requirements
+        required_vars = ['t_patch']
+        self._check_attributes(var_names=required_vars)
+
+        return self.vars['t_patch'].shape[0]
+    
+    @property
+    def day(self):
+        raise NotImplementedError
+
+    @property
+    def total_time(self):
+        # Requirements
+        req_vars = ['T']
+        self._check_attributes(var_names=req_vars)
+
+        return self.vars['T']
+
+    @property
+    def analyzed_time(self):
+        # Requirements
+        req_vars = ['t_stop']
+        self._check_attributes(var_names=req_vars)
+
+        return self.vars['t_stop']
+
+    def load_data(self, names):
+        if not isinstance(names, list):
+            names = [names]
+        for name in names:
+            if name in self.data_names:
+                if name not in self.data.keys():
+                    try:
+                        self.data[name] = self._load_data(name)
+                    except KeyError:
+                        raise UserWarning('Data \'%s\' cannot be found.' % name)
+            else:
+                raise Warning('Data name \'%s\' not recognized.' % name)
+    
+    def _load_data(self, name):
+        raise NotImplementedError
+
+    def clear_data(self, names=None):
+        if names is not None:
+            names = _check_list(names)
+            for name in names:
+                _ = self.data.pop(name)
+        else:
+            self.data = {}
+
+    def load_vars(self, names):
+        if not isinstance(names, list):
+            names = [names]
+        for name in names:
+            if name in self.var_names:
+                if name not in self.vars.keys():
+                    self.vars[name] = self._load_var(name)
+            else:
+                raise SyntaxError('Variable name \'%s\' not recognized.' % name)
+
+    def _load_var(self, name):
+        raise NotImplementedError
+
+    def clear_vars(self, names=None):
+        if names is not None:
+            names = _check_list(names)
+            for name in names:
+                _ = self.vars.pop(name)
+        else:
+            self.vars = {}
+
+    def _check_attributes(self, data_names=None, var_names=None):
+        if data_names is not None:
+            self.load_data(data_names)
+        if var_names is not None:
+            self.load_vars(var_names)
+        if self.vars.get('t_stop', 1.0) <= 0.0:
+            raise UserWarning('Unanalyzable session: not enough patches.')
+
+
+    def get_patch_times(self, var_name='t_patch'):
+        # Requirements
+        req_vars = [var_name]
+        self._check_attributes(var_names=req_vars)
+
+        return self.vars[var_name]
+
+    def _get_patch_times_from_signal(self, in_patch, fs):
+        # Find patch start points
+        t_patch_start = np.argwhere((in_patch - np.roll(in_patch, -1)) == -1).flatten()
+        if (in_patch[-1] == 0) and (in_patch[0] == 1):
+            # Correct wrap-around error
+            t_patch_start = t_patch_start[:-1]
+        if (np.sum(in_patch[:2]) == 2):
+            # Correct first data point
+            t_patch_start = np.insert(t_patch_start, 0, 0.0)
+        
+        # Find patch end points
+        t_patch_end = np.argwhere((in_patch - np.roll(in_patch, -1)) == 1).flatten()
+        if (in_patch[-1] == 1) and (in_patch[0] == 0):
+            # Correct wrap-around error
+            t_patch_end = t_patch_end[:-1]
+        if t_patch_end[0] < t_patch_start[0]:
+            # Correct initial error
+            t_patch_end = t_patch_end[1:]
+        
+        # Drop last patch-interpatch sequence
+        if len(t_patch_start) > len(t_patch_end):
+            # End in patch: drop last patch
+            t_stop = t_patch_start[-1]
+            t_patch_start = t_patch_start[:-1]
+        elif len(t_patch_start) == len(t_patch_end):
+            # End in interpatch: drop last patch and interpatch
+            t_stop = t_patch_start[-1]
+            t_patch_start = t_patch_start[:-1]
+            t_patch_end = t_patch_end[:-1]
+        else:
+            raise ValueError('Timestamps not understood: %d patch starts, %d patch stops'
+                            % (len(t_patch_start), len(t_patch_end)))
+            
+        t_patch_start = t_patch_start.astype(np.float64) / fs
+        t_patch_end = t_patch_end.astype(np.float64) / fs
+        t_patch = np.vstack([t_patch_start, t_patch_end]).T
+        t_stop = t_stop.astype(np.float64) / fs - 0.5 # to account for error
+        
+        return t_patch, t_stop
+
+    def get_patch_durations(self):
+        # Requirements
+        req_vars = ['t_patch']
+        self._check_attributes(var_names=req_vars)
+
+        return np.diff(self.vars['t_patch'], axis=1)[:, 0]
+
+    def get_interpatch_durations(self):
+        # Requirements
+        req_vars = ['t_patch', 't_stop']
+        self._check_attributes(var_names=req_vars)
+
+        t_switch = np.reshape(self.vars['t_patch'], [-1], order='C')
+        t_interpatch = np.append(t_switch[1:], self.vars['t_stop'])
+        t_interpatch = np.reshape(t_interpatch, [-1, 2])
+
+        return np.squeeze(np.diff(t_interpatch, axis=1))
+
+    def get_motor_times(self, var_name='t_motor'):
+        # Requirements
+        req_vars = [var_name]
+        self._check_attributes(var_names=req_vars)
+
+        return self.vars[var_name]
+    
+    def _get_motor_times(self, var_name='t_motor'):
+        # Requirements
+        req_data = ['motor', 'fs']
+        req_vars = ['t_stop']
+        self._check_attributes(data_names=req_data, var_names=req_vars)
+
+        # Find motor timestamps and durations
+        if var_name in ['t_motor', 'dt_motor']:
+            thresh = np.max(self.data['motor']) / 2.0 # half of 5V square wave
+            idx_stop = int(self.vars['t_stop'] * self.data['fs'])
+            motor = self.data['motor'][:idx_stop]
+            is_pump, idx_pump_start, idx_pump_end = self._find_threshold_crossings(motor, thresh)
+            t_motor = idx_pump_start / self.data['fs']
+            dt_motor = (idx_pump_end - idx_pump_start) / self.data['fs']
+
+            if var_name == 't_motor':
+                return t_motor
+            elif var_name == 'dt_motor':
+                return dt_motor
+
+        # Find number of rewards outside analyzable period
+        # (for double checking reward logging)
+        elif var_name == 'n_motor_rem':
+            thresh = np.max(self.data['motor']) / 2.0 # half of 5V square wave
+            idx_stop = int(self.vars['t_stop'] * self.data['fs'])
+            motor = self.data['motor'][idx_stop:]
+            is_pump, idx_pump_start, idx_pump_end = self._find_threshold_crossings(motor, thresh)
+            
+            return len(idx_pump_start)
+
+        else:
+            raise ValueError('Name \'%s\' not recognized.' % var_name)
+
+    def _find_threshold_crossings(self, y, thresh):
+        # Find where signal > thresh
+        is_on = (y > thresh).astype(np.int32)
+
+        # Find start and end of threshold crossings, correcting for end cases
+        idx_on_start = (np.argwhere((is_on - np.roll(is_on, -1)) == -1) + 1).flatten()
+        if is_on[0] and not is_on[-1]:
+            idx_on_start = idx_on_start[:-1]
+        idx_on_end = (np.argwhere((is_on - np.roll(is_on, -1)) == 1) + 1).flatten()
+        if not is_on[0] and is_on[-1]:
+            idx_on_end = idx_on_end[:-1]
+
+        # Correct if session ended with signal on
+        if idx_on_start.shape[0] == idx_on_end.shape[0] + 1:
+            idx_on_end = np.append(idx_on_end, is_on.shape[0]-1)
+
+        return is_on, idx_on_start, idx_on_end
+
+    def get_lick_times(self):
+        # Requirements
+        req_vars = ['t_lick']
+        self._check_attributes(var_names=req_vars)
+
+        return self.vars['t_lick']
+    
+    def _get_lick_times(self):
+        # Requirements
+        req_data = ['lick', 'fs']
+        req_vars = ['t_stop']
+        self._check_attributes(data_names=req_data, var_names=req_vars)
+
+        # Find lick timestamps
+        idx_stop = int(self.vars['t_stop'] * self.data['fs'])
+        lick = self.data['lick'][:idx_stop]
+        thresh = np.max(lick) / 2.0
+        idx_licking = (lick > thresh).astype(np.int32)
+        idx_lick = (np.argwhere((idx_licking - np.roll(idx_licking, -1)) == -1) + 1).flatten()
+        t_lick = idx_lick / self.data['fs']
+
+        return t_lick
+
+    def get_reward_volumes(self):
+        # Requirements
+        req_data = ['reward']
+        req_vars = ['t_motor', 'n_motor_rem']
+        self._check_attributes(data_names=req_data, var_names=req_vars)
+
+        # Get logged volumes
+        r_log = self.data['reward'][self.data['reward'] > 0]
+
+        # Compare motor trace to logged reward volume
+        if len(r_log) != len(self.vars['t_motor']) + self.vars['n_motor_rem']:
+            raise UserWarning('Logged rewards do not match motor trace.')
+        r_log = r_log[:self.vars['t_motor'].shape[0]] # filters by t_stop 
+
+        return r_log
+
+    def get_harvest_rate(self, metric='observed', **kwargs):
+        if metric == 'observed':
+            return self._get_observed_harvest_rate(**kwargs)
+        elif metric == 'max':
+            return self._get_max_harvest_rate(**kwargs)
+        elif metric == 'optimal':
+            return self._get_optimal_harvest_rate(**kwargs)
+    
+    def _get_observed_harvest_rate(self, per_patch=True, return_all=False):
+        if per_patch:
+            # Requirements
+            required_vars = ['t_patch', 't_motor', 'dt_motor']
+            self._check_attributes(var_names=required_vars)
+            if self.vars['t_motor'].size == 0:
+                return np.zeros(self.vars['t_patch'].shape[0])
+            
+            # Filter logged reward volumes by those given
+            r_log = self.get_reward_volumes()
+
+            # Create linear map from motor duration to reward volume
+            # (V = duration x flow_rate is not reliable)
+            #m = ( (np.max(r_log) - np.min(r_log))
+            #    / (np.max(self.vars['dt_motor']) - np.min(self.vars['dt_motor'])) )
+            #r_motor = lambda dt: m*dt - m*np.max(self.vars['dt_motor']) + np.max(r_log)
+
+            # Find patches in which rewards given
+            pad = 0.5 # padding in seconds
+            #idx_patch = in_interval(self.vars['t_motor'],
+            #                        self.vars['t_patch'][:, 0]-pad,
+            #                        self.vars['t_patch'][:, 1]+pad,
+            #                        query='event')
+            #if (idx_patch > 1).any():
+            #    raise UserWarning('Motor times cannot be uniquely assigned'
+            #                      ' to individual patches.')
+            #idx_patch = idx_patch.astype(np.bool)
+            idx_patch, _ = in_interval(self.vars['t_motor'],
+                                       self.vars['t_patch'][:, 0]-pad,
+                                       self.vars['t_patch'][:, 1]+pad,
+                                       query='event_interval')
+
+
+            # Calculate observed reward per patch
+            r_patch_obs = np.zeros(self.vars['t_patch'].shape[0])
+            for i in range(self.vars['t_patch'].shape[0]):
+                #r_patch_obs[i] = np.sum(self.vars['dt_motor'][idx_patch == i]*self.data['flow_rate']) # flow rate
+                #r_patch_obs[i] = np.sum(r_motor(self.vars['dt_motor'][idx_patch == i])) # linear map
+                r_patch_obs[i] = np.sum(r_log[idx_patch == i]) # logged volumes
+
+            # Divide reward per patch by segment time (patch + next interpatch)
+            t_seg = self._get_segment_durations()
+            hr_patch_obs = r_patch_obs / t_seg
+
+            if return_all:
+                return hr_patch_obs, r_patch_obs, t_seg
+            else:
+                return hr_patch_obs
+        
+        else:
+            # Requirements
+            required_data = ['reward']
+            required_vars = ['t_stop']
+            self._check_attributes(data_names=required_data, var_names=required_vars)
+
+            # Get total time and reward
+            t_total = self.vars['t_stop']
+            r_total = np.sum(self.data['reward'])
+            
+            if return_all:
+                return r_total / t_total, r_total, t_total
+            else:
+                return r_total / t_total
+
+    def _get_max_harvest_rate(self, per_patch=True):
+        """
+        Returns maximum attainable harvest rate given limitations of the
+        animal for the given task.
+        """
+        raise NotImplementedError
+
+    def _get_optimal_harvest_rate(self, per_patch=True):
+        """
+        Returns maximum theoretical harvest rate according to MVT.
+        """
+        raise NotImplementedError
+
+    def _get_segment_durations(self):
+        # Requirements
+        required_vars = ['t_patch', 't_stop']
+        self._check_attributes(var_names=required_vars)
+
+        t_seg = np.diff(self.vars['t_patch'][:, 0])
+        t_seg_last = self.vars['t_stop'] - self.vars['t_patch'][-1, 0]
+
+        return np.append(t_seg, t_seg_last)
+    
+class TTSession(Session):
+
+    SAMPLING_RATE = 500 # serial transmission rate of microprocessor (Hz)
+    BOARD_IDS = [16, 17, 22, 23, 24, 25, 26, 27] # GPIO IDs
+    REWARD_VOLUME = 2.0 # uL
+
+    def __init__(self, data, params):
+        """Session for data acquired on TreadmillTracker system"""
+
+        Session.__init__(self)
+
+        # Load files
+        self.raw_data = data
+        self.params = params
+
+        # Add allowed data and variable names
+        self.data_names += ['t_m', 't_os', 'GPIO', 'GPIO_labels']
+
+        # Create settings
+        self.settings = {}
+        GPIO_labels = {}
+        for k, v in self.params['GPIO'].items():
+            if v in self.BOARD_IDS:
+                GPIO_labels[k] = self.BOARD_IDS.index(v)
+            else:
+                GPIO_labels[k] = None
+        self.settings['GPIO_labels'] = GPIO_labels
+
+    @property
+    def day(self):
+        return self.params['Info'].get('Session', None)
+
+    def _load_data(self, name):
+        if name == 'motor':
+            return self._load_motor_data()
+        elif name == 'lick':
+            return self._load_lick_data()
+        elif name == 'fs':
+            return self.SAMPLING_RATE
+        elif name == 'reward':
+            self._check_attributes(var_names=['t_motor', 'n_motor_rem'])
+            n_motor = len(self.vars['t_motor']) + self.vars['n_motor_rem']
+            return self.REWARD_VOLUME*np.ones([n_motor])
+        elif name == 'GPIO':
+            return dec_to_bin_array(self.raw_data[:, 1], 
+                                    bits=8, 
+                                    bit_order='<')
+        elif name == 't_m':
+            return self.raw_data[:, 0]
+        elif name == 't_os':
+            return self.raw_data[:, 2]
+
+    def _load_var(self, name):
+        if name == 'T':
+            return self.raw_data.shape[0]
+        elif name in ['t_patch', 'in_patch', 't_stop']:
+            return self._get_patch_times(name)
+        elif name in ['t_motor', 'dt_motor', 'n_motor_rem']:
+            return self._get_motor_times(name)
+        elif name == 't_lick':
+            return self._get_lick_times()
+        else:
+            raise SyntaxError('Unknown variable name \'%s\'.' % name)
+    
+    def _get_GPIO_pins(self, labels):
+        if not isinstance(labels, list):
+            labels = [labels]
+
+        labels = [label.lower() for label in labels]
+
+        idx_pin = [v for k, v in self.settings['GPIO_labels'].items() 
+                   if any([label.lower() in k.lower() for label in labels])]
+
+        return np.array(idx_pin).astype(np.int64)
+
+    def _load_motor_data(self):
+        # Check requirements
+        req_data = ['GPIO']
+        req_vars = ['T']
+        self._check_attributes(data_names=req_data, var_names=req_vars)
+            
+        # Get GPIO pins
+        pins = self._get_GPIO_pins('dispense')
+
+        # Add motor traces
+        motor = np.zeros([self.vars['T']])
+        for pin in pins:
+            motor += self.data['GPIO'][:, pin]
+
+        if (motor < 0).any() or (motor >  1).any():
+            raise ValueError('Motor trace cannot be interpreted due to'
+                             ' overlapping rewards and/or negative values.')
+        else:
+            return motor
+
+    def _load_lick_data(self):
+        # Check requirements
+        req_data = ['GPIO']
+        req_vars = ['T']
+        self._check_attributes(data_names=req_data, var_names=req_vars)
+            
+        # Get GPIO pins
+        pins = self._get_GPIO_pins('lick')
+
+        # Add motor traces
+        lick = np.zeros([self.vars['T']])
+        for pin in pins:
+            lick += self.data['GPIO'][:, pin]
+
+        if (lick < 0).any() or (lick >  1).any():
+            raise ValueError('Lick trace cannot be interpreted due to'
+                             ' overlapping sensors and/or negative values.')
+        else:
+            return lick
+
+    def _get_patch_times(self, var_name='t_patch'):
+        # Get patch signal
+        t_patch, in_patch, t_stop = self._get_patch_times_from_GPIO()
+
+        # Return appropriate variable
+        if var_name == 't_patch':
+            return t_patch
+        elif var_name == 'in_patch':
+            return in_patch
+        elif var_name == 't_stop':
+            return t_stop
+        else:
+            raise ValueError('Name \'%s\' not recognized.' % var_name)
+
+    def _get_patch_times_from_GPIO(self):
+        # Check requirements
+        req_data = ['GPIO', 'fs']
+        self._check_attributes(data_names=req_data)
+
+        # Find patch labels
+        pins = self._get_GPIO_pins('poke')
+        num_patches = len(pins)
+        
+        # Get naive patch times
+        t_patch = []
+        idx_patch = []
+        in_patch = []
+        t_stop = []
+        for i, pin in enumerate(pins):
+            # Get times for patch i
+            in_patch_i = self.data['GPIO'][:, pin]
+            t_patch_i, t_stop_i = self._get_patch_times_from_signal(in_patch_i, self.data['fs'])
+
+            # Apply nose poke smoothing
+            t_patch_i = self._smooth_patch_times(t_patch_i)
+
+            # Log timestamps
+            t_patch.append(t_patch_i)
+            idx_patch.append(i*np.ones(t_patch_i.shape[0]))
+            in_patch.append(in_patch_i)
+            t_stop.append(t_stop_i)
+
+        # Combine patch times and patch IDs
+        t_patch = np.vstack(t_patch)
+        idx_patch = np.hstack(idx_patch)
+        in_patch = np.sum(np.vstack(in_patch), axis=0)
+        t_stop = np.array(t_stop)
+
+        # Sort combined data
+        idx_sort = np.argsort(t_patch[:, 0])
+        t_patch = t_patch[idx_sort, :]
+        idx_patch = idx_patch[idx_sort]
+
+        # Merge 
+
+        # Keep only alternating sequences
+        idx_keep = []
+        for i in range(num_patches):
+            # Find all occurences of patch i
+            idx_i = np.argwhere(idx_patch == i).flatten()
+            idx_keep_i = idx_i[np.argwhere(np.diff(idx_i) >= num_patches).flatten() + 1]
+            idx_keep_i = np.insert(idx_keep_i, 0, idx_i[0])
+            idx_keep.append(idx_keep_i)
+        idx_keep = np.sort(flatten_list(idx_keep)).astype(np.int64)
+        t_patch = t_patch[idx_keep, :]
+
+        # Stop at t_stop
+        t_stop = np.min(t_stop)
+        t_patch = t_patch[t_patch[:, 1] <= t_stop, :]
+
+        return t_patch, in_patch, t_stop
+
+    def _smooth_patch_times(self, t_patch):
+        """Applies nose poke sensor smoothing to patch entry/exit."""
+        # Check shape
+        if t_patch.ndim != 2:
+            raise SyntaxError('t_patch must be 2D array'
+                              ' but has %d dimensions.' % t_patch.ndim)
+        if t_patch.shape[1] != 2:
+            raise SyntaxError('t_patch must be N x 2 array' 
+                              ' but is N x %d.' % t_patch.shape[1])
+
+        # Get entry/exit delay parameters
+        entry_delay = self.params['Delay']['PokeEntryDelay']/1000
+        exit_delay = self.params['Delay']['PokeEntryDelay']/1000
+        
+        # Flatten t_patch into list
+        t_patch = list(t_patch.reshape([-1], order='C'))
+
+        # Iterate through flattened list
+        i = 0 # index of current patch start
+        while (i < len(t_patch)):
+            if t_patch[i+1] - t_patch[i] < entry_delay:
+                # Remove patch if min entry period not met
+                del t_patch[i:i+2]
+            elif i == len(t_patch) - 2:
+                # Avoid error at end of list
+                break
+            elif t_patch[i+2] - t_patch[i+1] < exit_delay:
+                # Merge with next patch if min exit period not met
+                del t_patch[i+1:i+3]
+            else:
+                # Otherwise, jump to next patch
+                i += 2
+        
+        # Return trimmed patch times as [N x 2] array
+        return np.array(t_patch).reshape([-1, 2], order='C')
+
+
+class LVSession(Session):
 
     WHEEL_CIRCUMFERENCE = 60 # cm
 
     def __init__(self, filename, pupil_filepath=None):
+        """Session for data acquired on LabVIEW system"""
+
+        Session.__init__(self)
+
         # Get filename
         self.filename = filename
         self.f = h5py.File(filename)
@@ -29,11 +618,10 @@ class Session:
         if match is not None:
             day = day[:match.span()[0]]
         self.day = int(day)
-        self.data_names = ['sound', 'motor', 'lick', 'cam', 'fs', 'wheel_time',
-                           'wheel_speed', 'wheel_position', 'dt_patch']
-        self.var_names = ['T', 't_patch', 'in_patch', 't_stop', 's_var',
-                          'fs_s', 't_s', 't_motor', 'dt_motor', 'n_motor_rem',
-                          't_lick', 't_wheel', 'v_smooth', 'd_pupil', 't_pupil']
+        self.data_names += ['sound', 'cam', 'wheel_time',
+                            'wheel_speed', 'wheel_position', 'dt_patch']
+        self.var_names += ['s_var', 'fs_s', 't_s', 't_wheel', 'v_smooth', 
+                           'd_pupil', 't_pupil']
         self.settings = {}
         struct = self.f['Settings']['Property']
 
@@ -72,10 +660,6 @@ class Session:
         self.settings['target_sound']['type'] = \
             self._ASCII_to_string(struct[s + 'TargetType'])
 
-        # Set placeholders
-        self.data = {}
-        self.vars = {}
-
     def _ASCII_to_float(self, s):
         return float([u''.join(chr(c) for c in s)][0])
     
@@ -84,19 +668,6 @@ class Session:
     
     def _ASCII_to_bool(self, s):
         return bool([u''.join(chr(c) for c in s)][0])
-
-    def load_data(self, names):
-        if not isinstance(names, list):
-            names = [names]
-        for name in names:
-            if name in self.data_names:
-                if name not in self.data.keys():
-                    try:
-                        self.data[name] = self._load_data(name)
-                    except KeyError:
-                        raise UserWarning('Data \'%s\' cannot be found.' % name)
-            else:
-                raise Warning('Data name \'%s\' not recognized.' % name)
     
     def _load_data(self, name):
         # Get chamber number (suffix for DAQ data)
@@ -131,24 +702,6 @@ class Session:
     def _load_subclass_data(self, name):
         pass
 
-    def clear_data(self, names=None):
-        if names is not None:
-            names = _check_list(names)
-            for name in names:
-                _ = self.data.pop(name)
-        else:
-            self.data = {}
-
-    def load_vars(self, names):
-        if not isinstance(names, list):
-            names = [names]
-        for name in names:
-            if name in self.var_names:
-                if name not in self.vars.keys():
-                    self.vars[name] = self._load_var(name)
-            else:
-                raise SyntaxError('Variable name \'%s\' not recognized.' % name)
-
     def _load_var(self, name):
         if name == 'T':
             return self._get_total_time()
@@ -170,22 +723,6 @@ class Session:
             return self._get_pupil_times()
         else:
             raise SyntaxError('Unknown variable name \'%s\'.' % name)
-        
-    def clear_vars(self, names=None):
-        if names is not None:
-            names = _check_list(names)
-            for name in names:
-                _ = self.vars.pop(name)
-        else:
-            self.vars = {}
-
-    def _check_attributes(self, data_names=None, var_names=None):
-        if data_names is not None:
-            self.load_data(data_names)
-        if var_names is not None:
-            self.load_vars(var_names)
-        if self.vars.get('t_stop', 1.0) <= 0.0:
-            raise UserWarning('Unanalyzable session: not enough patches.')
 
     def _get_total_time(self):
         # Requirements
@@ -209,20 +746,13 @@ class Session:
         else:
             raise ValueError('Name \'%s\' not recognized.' % var_name)
 
-    def get_patch_times(self, var_name='t_patch'):
-        # Requirements
-        req_vars = [var_name]
-        self._check_attributes(var_names=req_vars)
-
-        return self.vars[var_name]
-
     def _get_patch_times(self, var_name='t_patch'):
         # Requirements
         required_data = ['dt_patch']
         self._check_attributes(data_names=required_data)
 
         t_patch, in_patch, t_stop = \
-            self.get_patches_from_sound()
+            self._get_patches_from_sound()
         dt_patch = np.diff(t_patch, axis=1).flatten()
 
         if compare_patch_times(dt_patch, self.data['dt_patch']):
@@ -237,50 +767,7 @@ class Session:
         else:
             raise UserWarning('Patch durations from sound and log file do not match.')
 
-    def _get_patches_from_sound(self, s, fs, thresh):
-        # Determine data points in patch based on sound variance
-        in_patch = (s < thresh).astype(np.int32)
-        
-        # Find patch start points
-        t_patch_start = np.argwhere((in_patch - np.roll(in_patch, -1)) == -1).flatten()
-        if (in_patch[-1] == 0) and (in_patch[0] == 1):
-            # Correct wrap-around error
-            t_patch_start = t_patch_start[:-1]
-        if (np.sum(in_patch[:2]) == 2):
-            # Correct first data point
-            t_patch_start = np.insert(t_patch_start, 0, 0.0)
-        
-        # Find patch end points
-        t_patch_end = np.argwhere((in_patch - np.roll(in_patch, -1)) == 1).flatten()
-        if (in_patch[-1] == 1) and (in_patch[0] == 0):
-            # Correct wrap-around error
-            t_patch_end = t_patch_end[:-1]
-        if t_patch_end[0] < t_patch_start[0]:
-            # Correct initial error
-            t_patch_end = t_patch_end[1:]
-        
-        # Drop last patch-interpatch sequence
-        if len(t_patch_start) > len(t_patch_end):
-            # End in patch: drop last patch
-            t_stop = t_patch_start[-1]
-            t_patch_start = t_patch_start[:-1]
-        elif len(t_patch_start) == len(t_patch_end):
-            # End in interpatch: drop last patch and interpatch
-            t_stop = t_patch_start[-1]
-            t_patch_start = t_patch_start[:-1]
-            t_patch_end = t_patch_end[:-1]
-        else:
-            raise ValueError('Timestamps not understood: %d patch starts, %d patch stops'
-                            % (len(t_patch_start), len(t_patch_end)))
-            
-        t_patch_start = t_patch_start.astype(np.float64) / fs
-        t_patch_end = t_patch_end.astype(np.float64) / fs
-        t_patch = np.vstack([t_patch_start, t_patch_end]).T
-        t_stop = t_stop.astype(np.float64) / fs - 0.5 # to account for error
-        
-        return t_patch, in_patch, t_stop
-
-    def get_patches_from_sound(self, auto_thresh=True, init_thresh=5.0e-9):
+    def _get_patches_from_sound(self, auto_thresh=True, init_thresh=5.0e-9):
         required_data = ['dt_patch']
         required_vars = ['s_var', 'fs_s']
         self._check_attributes(data_names=required_data,
@@ -296,8 +783,8 @@ class Session:
         #print('Variance threshold: %.2e' % thresh)
         
         # Attempt to extract patches with initial threshold
-        t_patch, in_patch, t_stop = \
-            self._get_patches_from_sound(s, fs_s, thresh=thresh)
+        in_patch = (s < thresh).astype(np.int32)
+        t_patch, t_stop = self._get_patch_times_from_signal(in_patch, fs_s)
         dt_patch = np.diff(t_patch, axis=1).flatten()
         
         # Check for agreement with logged patch durations
@@ -308,8 +795,8 @@ class Session:
             thresh_range = np.linspace(0.2*thresh, 5*thresh, 50)
             for thresh in thresh_range:
                 try:
-                    t_patch, in_patch, t_stop = \
-                        self._get_patches_from_sound(s, fs_s, thresh=thresh)
+                    in_patch = (s < thresh).astype(np.int32)
+                    t_patch, t_stop = self._get_patch_times_from_signal(in_patch, fs_s)
                     dt_patch = np.diff(t_patch, axis=1).flatten()
                     if compare_patch_times(dt_patch, self.data['dt_patch']):
                         #print('Successful threshold found: %.2e' % thresh)
@@ -393,106 +880,6 @@ class Session:
                 t_stop, idx_stop
         else:
             return t_patch_wheel, idx_in_patch, t_stop
-        
-
-    def get_patch_durations(self):
-        # Requirements
-        req_vars = ['t_patch']
-        self._check_attributes(var_names=req_vars)
-
-        return np.diff(self.vars['t_patch'], axis=1)[:, 0]
-
-    def get_interpatch_durations(self):
-        # Requirements
-        req_vars = ['t_patch', 't_stop']
-        self._check_attributes(var_names=req_vars)
-
-        t_switch = np.reshape(self.vars['t_patch'], [-1], order='C')
-        t_interpatch = np.append(t_switch[1:], self.vars['t_stop'])
-        t_interpatch = np.reshape(t_interpatch, [-1, 2])
-
-        return np.squeeze(np.diff(t_interpatch, axis=1))
-
-    def get_motor_times(self, var_name='t_motor'):
-        # Requirements
-        req_vars = [var_name]
-        self._check_attributes(var_names=req_vars)
-
-        return self.vars[var_name]
-    
-    def _get_motor_times(self, var_name='t_motor'):
-        # Requirements
-        req_data = ['motor', 'fs']
-        req_vars = ['t_stop']
-        self._check_attributes(data_names=req_data, var_names=req_vars)
-
-        # Find motor timestamps and durations
-        if var_name in ['t_motor', 'dt_motor']:
-            thresh = 2.5 # half of 5V square wave
-            idx_stop = int(self.vars['t_stop'] * self.data['fs'])
-            motor = self.data['motor'][:idx_stop]
-            is_pump, idx_pump_start, idx_pump_end = self._find_threshold_crossings(motor, thresh)
-            t_motor = idx_pump_start / self.data['fs']
-            dt_motor = (idx_pump_end - idx_pump_start) / self.data['fs']
-
-            if var_name == 't_motor':
-                return t_motor
-            elif var_name == 'dt_motor':
-                return dt_motor
-
-        # Find number of rewards outside analyzable period
-        # (for double checking reward logging)
-        elif var_name == 'n_motor_rem':
-            thresh = 2.5 # half of 5V square wave
-            idx_stop = int(self.vars['t_stop'] * self.data['fs'])
-            motor = self.data['motor'][idx_stop:]
-            is_pump, idx_pump_start, idx_pump_end = self._find_threshold_crossings(motor, thresh)
-            
-            return len(idx_pump_start)
-
-        else:
-            raise ValueError('Name \'%s\' not recognized.' % var_name)
-
-    def _find_threshold_crossings(self, y, thresh):
-        # Find where signal > thresh
-        is_on = (y > thresh).astype(np.int32)
-
-        # Find start and end of threshold crossings, correcting for end cases
-        idx_on_start = (np.argwhere((is_on - np.roll(is_on, -1)) == -1) + 1).flatten()
-        if is_on[0] and not is_on[-1]:
-            idx_on_start = idx_on_start[:-1]
-        idx_on_end = (np.argwhere((is_on - np.roll(is_on, -1)) == 1) + 1).flatten()
-        if not is_on[0] and is_on[-1]:
-            idx_on_end = idx_on_end[:-1]
-
-        # Correct if session ended with motor on
-        if idx_on_start.shape[0] == idx_on_end.shape[0] + 1:
-            idx_on_end = np.append(idx_on_end, is_on.shape[0]-1)
-
-        return is_on, idx_on_start, idx_on_end
-
-    def get_lick_times(self):
-        # Requirements
-        req_vars = ['t_lick']
-        self._check_attributes(var_names=req_vars)
-
-        return self.vars['t_lick']
-    
-    def _get_lick_times(self):
-        # Requirements
-        req_data = ['lick', 'fs']
-        req_vars = ['t_stop']
-        self._check_attributes(data_names=req_data, var_names=req_vars)
-
-        # Find lick timestamps
-        idx_stop = int(self.vars['t_stop'] * self.data['fs'])
-        lick = self.data['lick'][:idx_stop]
-        thresh = np.max(lick) / 2
-        idx_licking = (lick > thresh).astype(np.int32)
-        idx_lick = (np.argwhere((idx_licking - np.roll(idx_licking, -1)) == -1) + 1).flatten()
-        t_lick = idx_lick / self.data['fs']
-
-        return t_lick
 
     def get_wheel_times(self):
         # Requirements
@@ -556,127 +943,9 @@ class Session:
         
         return v_smooth
 
-    def get_reward_volumes(self):
-        # Requirements
-        req_data = ['reward']
-        req_vars = ['t_motor', 'n_motor_rem']
-        self._check_attributes(data_names=req_data, var_names=req_vars)
-
-        # Get logged volumes
-        r_log = self.data['reward'][self.data['reward'] > 0]
-
-        # Compare motor trace to logged reward volume
-        if len(r_log) != len(self.vars['t_motor']) + self.vars['n_motor_rem']:
-            raise UserWarning('Logged rewards do not match motor trace.')
-        r_log = r_log[:self.vars['t_motor'].shape[0]] # filters by t_stop 
-
-        return r_log
-
-    def get_harvest_rate(self, metric='observed', **kwargs):
-        if metric == 'observed':
-            return self._get_observed_harvest_rate(**kwargs)
-        elif metric == 'max':
-            return self._get_max_harvest_rate(**kwargs)
-        elif metric == 'optimal':
-            return self._get_optimal_harvest_rate(**kwargs)
-    
-    def _get_observed_harvest_rate(self, per_patch=True, return_all=False):
-        if per_patch:
-            # Requirements
-            required_vars = ['t_patch', 't_motor', 'dt_motor']
-            self._check_attributes(var_names=required_vars)
-            if self.vars['t_motor'].size == 0:
-                return np.zeros(self.vars['t_patch'].shape[0])
-            
-            # Filter logged reward volumes by those given
-            r_log = self.get_reward_volumes()
-
-            # Create linear map from motor duration to reward volume
-            # (V = duration x flow_rate is not reliable)
-            #m = ( (np.max(r_log) - np.min(r_log))
-            #    / (np.max(self.vars['dt_motor']) - np.min(self.vars['dt_motor'])) )
-            #r_motor = lambda dt: m*dt - m*np.max(self.vars['dt_motor']) + np.max(r_log)
-
-            # Find patches in which rewards given
-            pad = 0.5 # padding in seconds
-            idx_patch = in_interval(self.vars['t_motor'],
-                                    self.vars['t_patch'][:, 0]-pad,
-                                    self.vars['t_patch'][:, 1]+pad,
-                                    query='event')
-            if (idx_patch > 1).any():
-                raise UserWarning('Motor times cannot be uniquely assigned'
-                                  ' to individual patches.')
-            idx_patch = idx_patch.astype(np.bool)
-
-            # Calculate observed reward per patch
-            r_patch_obs = np.zeros(self.vars['t_patch'].shape[0])
-            for i in range(self.vars['t_patch'].shape[0]):
-                #r_patch_obs[i] = np.sum(self.vars['dt_motor'][idx_patch == i]*self.data['flow_rate']) # flow rate
-                #r_patch_obs[i] = np.sum(r_motor(self.vars['dt_motor'][idx_patch == i])) # linear map
-                r_patch_obs[i] = np.sum(r_log[idx_patch == i]) # logged volumes
-
-            # Divide reward per patch by segment time (patch + next interpatch)
-            t_seg = self._get_segment_durations()
-            hr_patch_obs = r_patch_obs / t_seg
-
-            if return_all:
-                return hr_patch_obs, r_patch_obs, t_seg
-            else:
-                return hr_patch_obs
-        
-        else:
-            # Requirements
-            required_data = ['reward']
-            required_vars = ['t_stop']
-            self._check_attributes(data_names=required_data, var_names=required_vars)
-
-            # Get total time and reward
-            t_total = self.vars['t_stop']
-            r_total = np.sum(self.data['reward'])
-            
-            if return_all:
-                return r_total / t_total, r_total, t_total
-            else:
-                return r_total / t_total
-
-    def _get_max_harvest_rate(self, per_patch=True):
-        """
-        Returns maximum attainable harvest rate given limitations of the
-        animal for the given task.
-        """
-        raise NotImplementedError
-
-    def _get_optimal_harvest_rate(self, per_patch=True):
-        """
-        Returns maximum theoretical harvest rate according to MVT.
-        """
-        raise NotImplementedError
-
-    def _get_segment_durations(self):
-        # Requirements
-        required_vars = ['t_patch', 't_stop']
-        self._check_attributes(var_names=required_vars)
-
-        t_seg = np.diff(self.vars['t_patch'][:, 0])
-        t_seg_last = self.vars['t_stop'] - self.vars['t_patch'][-1, 0]
-
-        return np.append(t_seg, t_seg_last)
-
-    @property
-    def n_patches(self):
-        """
-        Returns number of analyzable patch-interpatch segments
-        during session.
-        """
-        # Requirements
-        required_vars = ['t_patch']
-        self._check_attributes(var_names=required_vars)
-
-        return self.vars['t_patch'].shape[0]
-
     def save(self, filepath):
         """
-        Serializes dictionary of class instance to specificed location.
+        Serializes dictionary of class instance to specified location.
         Can be subsequently loaded via:
             sess.save(filepath)
             new_sess = Session(data_file)
