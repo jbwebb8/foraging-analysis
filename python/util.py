@@ -113,12 +113,23 @@ def format_elapsed_time(dt):
     return h, m, s
 
 ### File handling ###
+class Error(Exception):
+    """Base class for exceptions in this module."""
+    pass
+
+class HTTPError(Error):
+    def __init__(self, status, message):
+        self.status = status
+        self.message = message
+        print(message)
+
 class GoogleDriveService:
     # If modifying these scopes, delete the file token.pickle.
-    SCOPES = ['https://www.googleapis.com/auth/drive.readonly']
+    SCOPES = ['https://www.googleapis.com/auth/drive']
 
-    # download_url = base_url + file_id + '?alt=media'
-    BASE_URL = 'https://www.googleapis.com/drive/v3/files/' # base download url
+    # Base URIs for downloads and uploads
+    BASE_DOWNLOAD_URI = 'https://www.googleapis.com/drive/v3/files'
+    BASE_UPLOAD_URI = 'https://www.googleapis.com/upload/drive/v3/files'
 
     def __init__(self, cred_file='credentials.json'):
         # Credentials placeholder
@@ -162,11 +173,11 @@ class GoogleDriveService:
                  file_object=None):
         # Get download url
         if file_id is None:
-            file_id = self.get_file_id(filename)
+            file_id = self.get_file_ids(filename, unique=True)[0]
         fields = self._service.files().get(fileId=file_id, fields='webContentLink, size').execute()
         size = int(fields['size'])
         #download_url = fields['webContentLink'] # doesn't work
-        download_url = self.BASE_URL + file_id + '?alt=media'
+        download_url = self.BASE_DOWNLOAD_URI + '/' + file_id + '?alt=media'
         #download_url = self._service.files().get_media(fileId=file_id).uri # also works
         
         # Set range of bytes to download
@@ -192,16 +203,167 @@ class GoogleDriveService:
             
             return True
 
-    def get_file_id(self, filename):
+    def upload(self, 
+               filepath,
+               filename=None,
+               folder_ids=None,
+               mime_type='application/octet-stream',
+               chunk_size=1024*256*4,
+               verbose=True):
+        """
+        Upload a file to Google Drive.
+
+        Args:
+        - filepath: Filepath on local disk of file to be uploaded.
+        - filename: Name to be given to uploaded file.
+        - folder_ids: List of ID(s) of folder(s) to upload file to.
+        - mime_type: MIME type of upload file.
+        - chunk_size: Size in bytes of each chunk to send to server.
+        - verbose: If True, print upload progress.
+
+        Returns:
+        - file_metadata: Dict containing metadata of uploaded file.
+
+        Useful resources:
+        - Google Drive API upload help: 
+          https://developers.google.com/drive/api/v3/manage-uploads
+        - Google Drive API http source code:
+          https://github.com/googleapis/google-api-python-client/blob/master/googleapiclient/http.py#L872
+        - httplib2 help (e.g. self._service._http):
+          https://httplib2.readthedocs.io/en/latest/libhttplib2.html#http-objects
+        """
+        # Check parameters
+        if (chunk_size % 1024*256 != 0):
+            raise SyntaxError('chunk_size must be multiple of 256 KB.')
+        
+        # Create byte I/O stream
+        f = open(filepath, 'rb')
+        f.seek(0, os.SEEK_END)
+        total_size = f.tell() # size of file in bytes
+
+        # Get Drive metadata
+        if filename is None:
+            filename = filepath.split('/')[-1]
+        if folder_ids is None:
+            folder_ids = [] # store in MyDrive
+        elif not isinstance(folder_ids, list):
+            folder_ids = [folder_ids]
+
+        # Initiate resumable session by uploading file metadata
+        file_metadata = {'name': filename,
+                        'parents': folder_ids}
+        body = json.dumps(file_metadata)
+        headers = {'X-Upload-Content-Type': mime_type,
+                'X-Upload-Content-Length': str(total_size),# size of entire file,
+                'Content-Type': 'application/json; charset=UTF-8', # use metadata
+                'Content-Length': str(len(body)) # size of metadata
+                }
+        init_uri = self.BASE_UPLOAD_URI + '?uploadType=resumable'
+        response, content = self._service._http.request(init_uri, 
+                                                        method='POST',
+                                                        body=body,
+                                                        headers=headers)
+        
+        # Get resumable upload URI if session successfully initiated
+        if response['status'] == '200':
+            upload_uri = response['location']
+        else:
+            self._raise_http_error(response, content)
+
+        # Upload in chunks until complete
+        start = 0
+        while (start == 0) or (response['status'] == '308'):
+            # Get next chunk
+            f.seek(start, os.SEEK_SET) # set pointer
+            chunk = f.read(chunk_size) # read next chunk
+            chunk_size_ = len(chunk) # if chunk is less than max size
+            end = start + chunk_size_ - 1
+
+            # Upload chunks to upload uri
+            headers = {'Content-Range': 'bytes %d-%d/%d' % (start, end, total_size),
+                       'Content-Length': str(chunk_size_)}
+            response, content = self._service._http.request(upload_uri, 
+                                                            method='PUT',
+                                                            body=chunk,
+                                                            headers=headers)
+
+            # Print progress update
+            if verbose and (self._progress(end+1, total_size) > self._progress(start, total_size)):
+                print('%d%% complete...' % self._progress(end+1, total_size))
+            
+            # Update pointer index
+            if 'range' in response:
+                start = int(response['range'].split('-')[-1]) + 1
+        
+        # Handle outcomes
+        if response['status'] in ['200', '201']:
+            print('File sucessfully uploaded.')
+            content = json.loads(content.decode('utf-8'))
+            #print('File ID: {}'.format(content['id']))
+            #print('Filename: {}'.format(content['name']))
+            #print('MIME Type: {}'.format(content['mimeType']))
+            return content
+        else:
+            self._raise_http_error(response, content)
+
+    def _progress(self, current, total, percentile=10):
+        """Returns current progress rounded down to nearest percentile."""
+        return (100*(current/total) // percentile)*percentile
+
+    def _raise_http_error(self, response, content):
+        raise HTTPError(response['status'], content.decode('utf-8'))
+
+    def _get_file_ids(self, filename):
+        # Query for files containing filename
         files = self._service.files().list(q="name contains '%s'" % filename).execute()['files']
         
+        # Return if not empty
         if len(files) == 0:
-            raise SyntaxError('No files matching \'%s\'.' % filename)
-        elif len(files) > 1:
+            raise SyntaxError('No files matching \'%s\'.' % filename) 
+        return [f['id'] for f in files]
+
+
+    def get_file_ids(self, filename, unique=False):
+        # Get file IDs containing filename
+        file_ids = self._get_file_ids(filename)
+        
+        if (len(file_ids) > 1) and unique:
             raise SyntaxError('Multiple files matching \'%s\'. Please specify.' % filename)
         else:
-            return files[0]['id']
+            return file_ids
 
+    def _get_file_metadata(self, file_ids, fields=None):
+        # Convert to list if needed
+        if not isinstance(file_ids, list):
+            file_ids = [file_ids]
+        
+        # Format field parameter (loosely)
+        if isinstance(fields, list):
+            fields = ','.join(fields)
+
+        # Get file metadata
+        files = []
+        for file_id in file_ids:
+            files.append(self._service.files().get(fileId=file_id, fields=fields))
+        
+        return files
+
+    def get_file_metadata(self, filename, fields=None, unique=False):
+        # Get file metadata from list of file IDs
+        file_ids = self.get_file_ids(filename, unique=unique)
+        return self._get_file_metadata(file_ids, fields=fields)
+ 
+    def get_folder_ids(self, filename, unique=False):
+        # Get file ID(s) of filename
+        file_ids = self.get_file_ids(filename, unique=unique)
+
+        # Create list of all folder IDs
+        folder_ids = []
+        for file_id in file_ids:
+            parents = drive_service._service.files().get(fileId=file_id, fields='parents').execute()['parents']
+            folder_ids += [p for p in parents]
+
+        return folder_ids
 
 class GoogleDriveFile:
 
@@ -209,7 +371,8 @@ class GoogleDriveFile:
         # Set global attributes
         self._service = service # GoogleDriveService object
         self.filename = filename
-        self.file_id = self._service.get_file_id(filename)
+        self.file_id = self._service.get_file_ids(filename, unique=True)
+
 
         # Set initial parameters
         self.pointer = 0 # pointer to current byte
@@ -389,7 +552,7 @@ class MDAReader:
 
         return X.reshape([self.num_channels, num_samples], order='F')[ch_start:ch_end+1, :]
 
-def bytes_to_object(chunk, ob_type='numpy'):
+def bytes_to_object(chunk, ob_type='numpy', load_fn=None):
     """Loads bytes into specified object by creating temporary file.
     
     Args:
@@ -397,6 +560,7 @@ def bytes_to_object(chunk, ob_type='numpy'):
     - ob_type: type of object to create
         - numpy: numpy array
         - json: JSON file
+    - load_fn: specific function to interpret byte object if needed.
     """
     # Load temporary file-like object
     temp = TemporaryFile()
@@ -405,9 +569,16 @@ def bytes_to_object(chunk, ob_type='numpy'):
 
     # Create object
     if ob_type == 'numpy':
-        obj = np.load(temp)
+        if load_fn == None:
+            obj = np.load(temp)
+        else:
+            obj = load_fn(temp)
+
     elif ob_type == 'json':
-        obj = json.load(temp)
+        if load_fn == None:
+            obj = json.load(temp)
+        else:
+            obj = load_fn(temp)
     else:
         raise SyntaxError('Unknown object type \'%s\'.' % ob_type)
 
@@ -703,3 +874,35 @@ def get_peristimulus_data(data,
     t_window = idx_window / fs
 
     return t_window, data_win
+
+def dec_to_bin_array(d, bits=None, bit_order='<'):
+    # No need for axis argument: just put newaxis on end,
+    # and can transpose later if needed
+    
+    # Convert to numpy array if needed
+    if not isinstance(d, np.ndarray):
+        d = np.array([d])
+    
+    # Calculate minimum bits to represent integer
+    min_bits = np.max(np.ceil(np.log2(np.maximum(d, np.ones(d.shape))))).astype(np.int64)
+    if bits is None:
+        bits = min_bits
+    elif bits < min_bits:
+        raise ValueError('Not enough bits to represent number. At least %d bits required.' % min_bits)
+    
+    # Broadcast binary representation to new axis at end
+    b = np.zeros(list(d.shape) + [bits], dtype=np.int16)
+    rem = d
+    bit = bits
+    while (bit > 0) and (rem > 0).any():
+        bit -= 1
+        b[..., bit] = (rem >= 2**bit)
+        rem = rem % 2**bit
+    
+    # Return binary representation
+    if bit_order == '<':
+        return b
+    elif bit_order == '>':
+        return b[..., ::-1]
+    else:
+        raise ValueError('Unknown bit order \'%s\'' % byte_order)
