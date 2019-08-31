@@ -173,7 +173,9 @@ class GoogleDriveService:
                  file_object=None):
         # Get download url
         if file_id is None:
-            file_id = self.get_file_ids(filename, unique=True)[0]
+            file_id = self.get_file_ids(filename=filename, 
+                                        unique=True,
+                                        exact_match=True)[0]
         fields = self._service.files().get(fileId=file_id, fields='webContentLink, size').execute()
         size = int(fields['size'])
         #download_url = fields['webContentLink'] # doesn't work
@@ -203,8 +205,9 @@ class GoogleDriveService:
             
             return True
 
-    def upload(self, 
-               filepath,
+    def upload(self, *,
+               filepath=None,
+               file_stream=None,
                filename=None,
                folder_ids=None,
                mime_type='application/octet-stream',
@@ -237,7 +240,12 @@ class GoogleDriveService:
             raise SyntaxError('chunk_size must be multiple of 256 KB.')
         
         # Create byte I/O stream
-        f = open(filepath, 'rb')
+        if filepath is not None:
+            f = open(filepath, 'rb')
+        elif file_stream is not None:
+            f = file_stream
+        else:
+            raise SyntaxError('Filepath or I/O object must be provided.')
         f.seek(0, os.SEEK_END)
         total_size = f.tell() # size of file in bytes
 
@@ -254,10 +262,10 @@ class GoogleDriveService:
                         'parents': folder_ids}
         body = json.dumps(file_metadata)
         headers = {'X-Upload-Content-Type': mime_type,
-                'X-Upload-Content-Length': str(total_size),# size of entire file,
-                'Content-Type': 'application/json; charset=UTF-8', # use metadata
-                'Content-Length': str(len(body)) # size of metadata
-                }
+                   'X-Upload-Content-Length': str(total_size),# size of entire file,
+                   'Content-Type': 'application/json; charset=UTF-8', # use metadata
+                   'Content-Length': str(len(body)) # size of metadata
+                  }
         init_uri = self.BASE_UPLOAD_URI + '?uploadType=resumable'
         response, content = self._service._http.request(init_uri, 
                                                         method='POST',
@@ -294,6 +302,8 @@ class GoogleDriveService:
             # Update pointer index
             if 'range' in response:
                 start = int(response['range'].split('-')[-1]) + 1
+            else:
+                start = end + 1
         
         # Handle outcomes
         if response['status'] in ['200', '201']:
@@ -313,9 +323,53 @@ class GoogleDriveService:
     def _raise_http_error(self, response, content):
         raise HTTPError(response['status'], content.decode('utf-8'))
 
-    def _get_file_ids(self, filename):
-        # Query for files containing filename
-        files = self._service.files().list(q="name contains '%s'" % filename).execute()['files']
+    def _get_file_ids(self, *,
+                      filename=None, 
+                      mime_type=None,
+                      exact_match=False,
+                      parent=None):
+        """
+        Search for file IDs given criteria. Remember that folders are considered
+        files with the MIME type 'application/vnd.google-apps.folder'.
+
+        Useful resources:
+        - https://developers.google.com/drive/api/v3/search-files
+        """
+        q = ""
+        
+        # Query filename
+        if filename is not None:
+            if exact_match:
+                q_rel = '='
+            else:
+                q_rel = 'contains'
+            q += "name {} '{}'".format(q_rel, filename)
+
+        # Query MIME type
+        if mime_type is not None:
+            if len(q) > 0:
+                c = ' and '
+            else:
+                c = ''
+            q += "{}mimeType = '{}'".format(c, mime_type)
+
+        # Query parents
+        if parent is not None:
+            # Convert parent name to folder ID
+            assert isinstance(parent, str)
+            parent = self.get_folder_ids(foldername=parent, exact_match=True)
+            parent = ','.join(parent)
+            if len(q) > 0:
+                c = ' and '
+            else:
+                c = ''
+            q += "{}'{}' in parents".format(c, parent)
+
+        # Query for files
+        if len(q) > 0:
+            files = self._service.files().list(q=q).execute()['files']
+        else:
+            raise SyntaxError('Empty query string.')
         
         # Return if not empty
         if len(files) == 0:
@@ -323,9 +377,17 @@ class GoogleDriveService:
         return [f['id'] for f in files]
 
 
-    def get_file_ids(self, filename, unique=False):
+    def get_file_ids(self, *, 
+                     filename=None, 
+                     unique=False, 
+                     mime_type=None,
+                     exact_match=False,
+                     parent=None):
         # Get file IDs containing filename
-        file_ids = self._get_file_ids(filename)
+        file_ids = self._get_file_ids(filename=filename, 
+                                      mime_type=mime_type,
+                                      exact_match=exact_match,
+                                      parent=parent)
         
         if (len(file_ids) > 1) and unique:
             raise SyntaxError('Multiple files matching \'%s\'. Please specify.' % filename)
@@ -353,17 +415,36 @@ class GoogleDriveService:
         file_ids = self.get_file_ids(filename, unique=unique)
         return self._get_file_metadata(file_ids, fields=fields)
  
-    def get_folder_ids(self, filename, unique=False):
-        # Get file ID(s) of filename
-        file_ids = self.get_file_ids(filename, unique=unique)
+    def get_folder_ids(self, *,
+                       foldername=None,
+                       filename=None, 
+                       unique=False,
+                       exact_match=False,
+                       parent=None):
+        if foldername is not None:
+            # Get IDs of folder(s) with foldername
+            return self.get_file_ids(filename=foldername,
+                                     unique=unique,
+                                     mime_type='application/vnd.google-apps.folder',
+                                     exact_match=exact_match,
+                                     parent=parent)
+            
+        elif filename is not None:
+            # Get file ID(s) of filename
+            file_ids = self.get_file_ids(filename=filename, 
+                                         unique=unique,
+                                         exact_match=exact_match)
 
-        # Create list of all folder IDs
-        folder_ids = []
-        for file_id in file_ids:
-            parents = drive_service._service.files().get(fileId=file_id, fields='parents').execute()['parents']
-            folder_ids += [p for p in parents]
+            # Create list of all folder IDs containing file ID(s)
+            folder_ids = []
+            for file_id in file_ids:
+                parents = drive_service._service.files().get(fileId=file_id, fields='parents').execute()['parents']
+                folder_ids += [p for p in parents]
 
-        return folder_ids
+            return folder_ids
+        
+        else:
+            raise SyntaxError('Foldername or filename must be provided.')
 
 class GoogleDriveFile:
 
