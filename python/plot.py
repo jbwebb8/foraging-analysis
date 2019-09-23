@@ -21,6 +21,9 @@ class Plotter:
         # Initial figure
         self.fig = None
 
+    def set_cmap(self, name):
+        self.cmap = plt.get_cmap(name)
+
     def create_new_figure(self, figsize=(15, 15), rows=1, cols=1):
         # Clear old figure
         plt.close('all')
@@ -51,12 +54,33 @@ class Plotter:
             idx = tuple(idx)
         self.ax = self.axes[idx]
 
+    def set_yscale(self, scale, all_axes=True):
+        if all_axes:
+            axes_ = self.axes[self.show].flatten()
+        else:
+            axes_ = [self.ax]
+
+        for ax_ in axes_:
+            ax_.set_yscale(scale)
+
+    def set_xscale(self, scale, all_axes=True):
+        if all_axes:
+            axes_ = self.axes[self.show].flatten()
+        else:
+            axes_ = [self.ax]
+
+        for ax_ in axes_:
+            ax_.set_xscale(scale)
+
+    
+
     def plot_learning_curve(self,
                             days,
                             data,
                             day_range=None,
                             center='median',
                             err='sem',
+                            err_plot='bar',
                             label=None,
                             c=0.5,
                             plot_traces=False,
@@ -117,15 +141,29 @@ class Plotter:
                                             ids=days, 
                                             method=err, 
                                             return_all=False)
-        y_err = np.vstack([np.zeros(len(data_err)), data_err])
         plot_idx = get_plot_idx(days_)
-        self.ax.errorbar(days_[plot_idx], 
+        if err_plot.lower() == 'bar':
+            y_err = np.vstack([np.zeros(len(data_err)), data_err])
+            self.ax.errorbar(days_[plot_idx], 
+                            data_[plot_idx], 
+                            yerr=y_err[:, plot_idx], 
+                            color=self.cmap(c),
+                            marker='o',
+                            capsize=5,
+                            label=label)
+        elif err_plot.lower() == 'fill':
+            y_err_low = data_[plot_idx] - data_err[plot_idx]
+            y_err_high = data_[plot_idx] + data_err[plot_idx]
+            self.ax.plot(days_[plot_idx], 
                          data_[plot_idx], 
-                         yerr=y_err[:, plot_idx], 
                          color=self.cmap(c),
-                         marker='o',
-                         capsize=5,
+                         linewidth=3,
                          label=label)
+            self.ax.fill_between(days_[plot_idx],
+                                 y1=y_err_low,
+                                 y2=y_err_high,
+                                 color=self.cmap(c),
+                                 alpha=0.5)
 
     def plot_harvest_rates(self, days, hr, figsize=(10, 10), **kwargs):
         # Create new figure
@@ -204,7 +242,6 @@ class Plotter:
         self.ax.set_title('Patch Residence Times across Sessions')
         self.ax.set_xlabel('Session')
         self.ax.set_ylabel('Patch Residence Time (s)')
-        self.ax.set_yscale('log')
         xlim = self.ax.get_xlim()
         self.ax.set_xlim([xlim[0], xlim[1] + 5])
 
@@ -220,7 +257,6 @@ class Plotter:
         self.ax.set_title('Travel Times across Sessions')
         self.ax.set_xlabel('Session')
         self.ax.set_ylabel('Travel Time (s)')
-        self.ax.set_yscale('log')
         xlim = self.ax.get_xlim()
         self.ax.set_xlim([xlim[0], xlim[1] + 5])
 
