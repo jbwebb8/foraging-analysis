@@ -170,7 +170,8 @@ class GoogleDriveService:
                  file_id=None, 
                  byte_range=None,
                  chunk_size=100*1024*1024, # from Google API
-                 file_object=None):
+                 file_object=None,
+                 verbose=True):
         # Get download url
         if file_id is None:
             file_id = self.get_file_ids(filename=filename, 
@@ -198,9 +199,17 @@ class GoogleDriveService:
         else:
             pointer = byte_range[0]
             while pointer < byte_range[1]:
-                header = {'Range': 'bytes=%d-%d' % (pointer, min(pointer + chunk_size - 1, size - 1))}
+                # Get next chunk and write to file object
+                end = min(pointer + chunk_size - 1, size - 1)
+                header = {'Range': 'bytes=%d-%d' % (pointer, end)}
                 resp, content = self._service._http.request(download_url, headers=header)
                 file_object.write(content)
+
+                # Print progress update
+                if verbose and (self._progress(end+1, byte_range[1]) > self._progress(pointer, byte_range[1])):
+                    print('%d%% complete...' % self._progress(end+1, byte_range[1]))
+
+                # Update pointer
                 pointer += chunk_size
             
             return True
@@ -323,6 +332,17 @@ class GoogleDriveService:
     def _raise_http_error(self, response, content):
         raise HTTPError(response['status'], content.decode('utf-8'))
 
+    def _make_request(self, request, timeout=5.0, max_attempts=10):
+        """Make HTTP request repeatedly, with timeouts in-between"""
+        attempt = 0
+        while attempt < max_attempts:
+            try:
+                return request.execute()
+            except HttpError as e:
+                time.sleep(timeout)
+        
+        
+
     def _get_file_ids(self, *,
                       filename=None, 
                       mime_type=None,
@@ -355,10 +375,13 @@ class GoogleDriveService:
 
         # Query parents
         if parent is not None:
-            # Convert parent name to folder ID
+            # Parent must be string if either name or ID provided
             assert isinstance(parent, str)
-            parent = self.get_folder_ids(foldername=parent, exact_match=True)
-            parent = ','.join(parent)
+            try: # convert parent name to folder ID
+                parent = self.get_folder_ids(foldername=parent, exact_match=True)
+                parent = ','.join(parent)
+            except SyntaxError: # assume parent ID provided
+                pass
             if len(q) > 0:
                 c = ' and '
             else:
@@ -406,13 +429,22 @@ class GoogleDriveService:
         # Get file metadata
         files = []
         for file_id in file_ids:
-            files.append(self._service.files().get(fileId=file_id, fields=fields))
-        
+            request = self._service.files().get(fileId=file_id, fields=fields)
+            metadata = self._make_request(request)
+            files.append(metadata)
         return files
 
-    def get_file_metadata(self, filename, fields=None, unique=False):
+    def get_file_metadata(self, *,
+                          filename=None,
+                          file_ids=None, 
+                          fields=None, 
+                          unique=False,
+                          parent=None):
         # Get file metadata from list of file IDs
-        file_ids = self.get_file_ids(filename, unique=unique)
+        if filename is not None:
+            file_ids = self.get_file_ids(filename=filename, 
+                                         unique=unique,
+                                         parent=parent)
         return self._get_file_metadata(file_ids, fields=fields)
  
     def get_folder_ids(self, *,
@@ -891,6 +923,12 @@ def get_patch_statistics(stats,
             _, args_i = flatten_list(stats_all, ids=args[i])
             args_all.append(args_i)
     
+    # Filter out NaN values
+    if ignore_nan:
+        idx = ~np.isnan(stats_all)
+        stats_all = stats_all[idx]
+        ids_all = ids_all[idx]
+
     # Calculate desired metric for all points with given id
     if method == 'mean':
         f = np.mean
