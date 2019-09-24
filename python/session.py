@@ -228,14 +228,11 @@ class Session:
         # Find start and end of threshold crossings, correcting for end cases
         idx_on_start = (np.argwhere((is_on - np.roll(is_on, -1)) == -1) + 1).flatten()
         if is_on[0] and not is_on[-1]:
-            idx_on_start = idx_on_start[:-1]
+            idx_on_start = idx_on_start[:-1] # drop false start at end
+            idx_on_start = np.insert(idx_on_start, 0, 0) # add start at beginning
         idx_on_end = (np.argwhere((is_on - np.roll(is_on, -1)) == 1) + 1).flatten()
         if not is_on[0] and is_on[-1]:
-            idx_on_end = idx_on_end[:-1]
-
-        # Correct if session ended with signal on
-        if idx_on_start.shape[0] == idx_on_end.shape[0] + 1:
-            idx_on_end = np.append(idx_on_end, is_on.shape[0]-1)
+            pass # corrects itself by adding at end
 
         return is_on, idx_on_start, idx_on_end
 
@@ -379,7 +376,7 @@ class TTSession(Session):
     BOARD_IDS = [16, 17, 22, 23, 24, 25, 26, 27] # GPIO IDs
     REWARD_VOLUME = 2.0 # uL
 
-    def __init__(self, data, params):
+    def __init__(self, data=None, params=None):
         """Session for data acquired on TreadmillTracker system"""
 
         Session.__init__(self)
@@ -391,19 +388,21 @@ class TTSession(Session):
         # Add allowed data and variable names
         self.data_names += ['t_m', 't_os', 'GPIO', 'GPIO_labels']
 
-        # Create settings
+        # Create settings if files provided; otherwise, expect load()
+        # to be called next.
         self.settings = {}
-        GPIO_labels = {}
-        for k, v in self.params['GPIO'].items():
-            if v in self.BOARD_IDS:
-                GPIO_labels[k] = self.BOARD_IDS.index(v)
-            else:
-                GPIO_labels[k] = None
-        self.settings['GPIO_labels'] = GPIO_labels
+        if self.params is not None:
+            GPIO_labels = {}
+            for k, v in self.params['GPIO'].items():
+                if v in self.BOARD_IDS:
+                    GPIO_labels[k] = self.BOARD_IDS.index(v)
+                else:
+                    GPIO_labels[k] = None
+            self.settings['GPIO_labels'] = GPIO_labels
 
     @property
     def day(self):
-        return self.params['Info'].get('Session', None)
+        return self.params['Info'].get('Session', -1)
 
     def _load_data(self, name):
         if name == 'motor':
@@ -417,13 +416,13 @@ class TTSession(Session):
             n_motor = len(self.vars['t_motor']) + self.vars['n_motor_rem']
             return self.REWARD_VOLUME*np.ones([n_motor])
         elif name == 'GPIO':
-            return dec_to_bin_array(self.raw_data[:, 1], 
+            return dec_to_bin_array(self.raw_data[:, self.params['Data']['GPIO']], 
                                     bits=8, 
                                     bit_order='<')
         elif name == 't_m':
-            return self.raw_data[:, 0]
+            return self.raw_data[:, self.params['Data']['MasterTime']]
         elif name == 't_os':
-            return self.raw_data[:, 2]
+            return self.raw_data[:, self.params['Data']['ComputerTime']]
 
     def _load_var(self, name):
         if name == 'T':
@@ -502,14 +501,22 @@ class TTSession(Session):
         else:
             raise ValueError('Name \'%s\' not recognized.' % var_name)
 
-    def _get_patch_times_from_GPIO(self):
+    def _get_patch_times_from_GPIO(self, fs=None, GPIO_labels=None):
         # Check requirements
         req_data = ['GPIO', 'fs']
         self._check_attributes(data_names=req_data)
 
+        # Get sampling rate (for acquiring system timestamps if needed)
+        if fs is None:
+            fs = self.data['fs']
+
         # Find patch labels
         pins = self._get_GPIO_pins('poke')
         num_patches = len(pins)
+        if GPIO_labels is not None:
+            pins_to_return = self._get_GPIO_pins(GPIO_labels)
+        else:
+            pins_to_return = pins
         
         # Get naive patch times
         t_patch = []
@@ -519,7 +526,7 @@ class TTSession(Session):
         for i, pin in enumerate(pins):
             # Get times for patch i
             in_patch_i = self.data['GPIO'][:, pin]
-            t_patch_i, t_stop_i = self._get_patch_times_from_signal(in_patch_i, self.data['fs'])
+            t_patch_i, t_stop_i = self._get_patch_times_from_signal(in_patch_i, fs)
 
             # Apply nose poke smoothing
             t_patch_i = self._smooth_patch_times(t_patch_i)
@@ -541,16 +548,15 @@ class TTSession(Session):
         t_patch = t_patch[idx_sort, :]
         idx_patch = idx_patch[idx_sort]
 
-        # Merge 
-
         # Keep only alternating sequences
         idx_keep = []
-        for i in range(num_patches):
-            # Find all occurences of patch i
-            idx_i = np.argwhere(idx_patch == i).flatten()
-            idx_keep_i = idx_i[np.argwhere(np.diff(idx_i) >= num_patches).flatten() + 1]
-            idx_keep_i = np.insert(idx_keep_i, 0, idx_i[0])
-            idx_keep.append(idx_keep_i)
+        for i, pin in enumerate(pins):
+            if pin in pins_to_return:
+                # Find all occurences of patch i
+                idx_i = np.argwhere(idx_patch == i).flatten()
+                idx_keep_i = idx_i[np.argwhere(np.diff(idx_i) >= num_patches).flatten() + 1]
+                idx_keep_i = np.insert(idx_keep_i, 0, idx_i[0])
+                idx_keep.append(idx_keep_i)
         idx_keep = np.sort(flatten_list(idx_keep)).astype(np.int64)
         t_patch = t_patch[idx_keep, :]
 
@@ -571,8 +577,8 @@ class TTSession(Session):
                               ' but is N x %d.' % t_patch.shape[1])
 
         # Get entry/exit delay parameters
-        entry_delay = self.params['Delay']['PokeEntryDelay']/1000
-        exit_delay = self.params['Delay']['PokeEntryDelay']/1000
+        entry_delay = self.params['Delay'].get('PokeEntryDelay', 0)/1000
+        exit_delay = self.params['Delay'].get('PokeExitDelay', 0)/1000
         
         # Flatten t_patch into list
         t_patch = list(t_patch.reshape([-1], order='C'))
@@ -595,6 +601,58 @@ class TTSession(Session):
         
         # Return trimmed patch times as [N x 2] array
         return np.array(t_patch).reshape([-1, 2], order='C')
+
+    def save(self, filepath):
+        """
+        Serializes dictionary of class instance to specified location.
+        Can be subsequently loaded via:
+            sess.save(filepath)
+            new_sess = Session(data_file)
+            new_sess.load(filepath)
+        """
+        f = open(filepath, 'wb')
+        d = self.__dict__.copy()
+        pickle.dump(d, f)
+        f.close()
+
+    def load(self, filepath, load_keys=None, ignore_keys=[]):
+        """
+        Loads serialized dictionary of class instance.
+        """
+        f = open(filepath, 'rb')
+        d = pickle.load(f)
+        if load_keys is None:
+            load_keys = d.keys()
+        for k, v in d.items():
+            if k in load_keys and not k in ignore_keys:
+                self.__dict__[k] = v
+        f.close()
+   
+    def _get_optimal_harvest_rate(self, per_patch=True, return_all=False):
+        """
+        Returns maximum theoretical harvest rate according to MVT.
+        """
+        # Estimate minimum feasible travel time based on session statistics
+        # by calculating average of fastest quartile
+        t_t = self.get_interpatch_durations()
+        t_t_min = np.mean(np.sort(t_t)[:max(int(t_t.size/4), 1)])
+
+        # Grab session settings
+        try:
+            R_0 = self.params['Reward']['R_0']
+            r_0 = self.params['Reward']['r_0']
+            tau = self.params['Reward']['tau']
+        except KeyError:
+            raise UserWarning('Reward depletion parameters not specified.')
+
+        # Minimum travel time: R_0 / r_0
+        t_p_opt, r_opt = get_optimal_values(t_t=t_t_min, R_0=R_0, r_0=r_0, tau=tau)
+        
+        if return_all:
+            return r_opt / (t_p_opt + t_t), r_opt, t_p_opt, t_t
+        else:
+            return r_opt / (t_p_opt + t_t)
+        
 
 
 class LVSession(Session):
