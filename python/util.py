@@ -806,9 +806,9 @@ def flatten_list(a, ids=None):
     a_flat = np.zeros(n)
     ids_flat = np.zeros(n)
     j = 0
-    
+
     if ids is not None:
-        for i, [a_i, idx] in enumerate(zip(a, ids)):
+        for i, (a_i, idx) in enumerate(zip(a, ids)):
             if isinstance(a_i, np.ndarray):
                 a_flat[j:j+a_i.size] = a_i.flatten()
                 if isinstance(idx, list) or isinstance(idx, np.ndarray):
@@ -826,13 +826,11 @@ def flatten_list(a, ids=None):
             else:
                 a_flat[j] = np.asarray(a_i)
                 if isinstance(idx, list) or isinstance(idx, np.ndarray):
-                    print(j)
-                    print(idx)
                     ids_flat[j] = np.asarray(idx)
                 else:
                     ids_flat[j] = idx
                 j += 1
-                
+              
         return a_flat, ids_flat
     
     else:
