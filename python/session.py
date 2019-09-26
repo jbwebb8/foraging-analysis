@@ -310,7 +310,7 @@ class Session:
             #    raise UserWarning('Motor times cannot be uniquely assigned'
             #                      ' to individual patches.')
             #idx_patch = idx_patch.astype(np.bool)
-            idx_patch, _ = in_interval(self.vars['t_motor'],
+            _, idx_patch = in_interval(self.vars['t_motor'],
                                        self.vars['t_patch'][:, 0]-pad,
                                        self.vars['t_patch'][:, 1]+pad,
                                        query='event_interval')
