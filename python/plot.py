@@ -89,8 +89,10 @@ class Plotter:
         def get_plot_idx(d):
             if day_range is None:
                 return np.ones(len(d), dtype=np.bool)
-            else:
+            elif len(day_range) == 2: # assume [min, max]
                 return np.logical_and(d >= day_range[0], d <= day_range[1])
+            else: # assume array of possible values
+                return np.isin(d, np.array(day_range))
 
         # Convert to dictionary if needed (e.g. single animal data)
         if not isinstance(data, dict):
@@ -165,9 +167,15 @@ class Plotter:
                                  color=self.cmap(c),
                                  alpha=0.5)
 
-    def plot_harvest_rates(self, days, hr, figsize=(10, 10), **kwargs):
+    def plot_harvest_rates(self, 
+                           days, 
+                           hr, 
+                           figsize=(10, 10), 
+                           new_fig=True, 
+                           **kwargs):
         # Create new figure
-        self.create_new_figure(figsize=figsize)
+        if new_fig:
+            self.create_new_figure(figsize=figsize)
 
         # Heavy lifting
         self.plot_learning_curve(days, hr, **kwargs)
