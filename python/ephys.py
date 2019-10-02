@@ -700,7 +700,7 @@ def _kernel_smoothing(counts,
 
 def _create_smoothing_kernel(kernel_type, dt_bin, **kwargs):
     if kernel_type == 'Gaussian':
-        sigma = kwargs.get('sigma', 0.100) # kernel width (ms)
+        sigma = kwargs.get('sigma', 0.100) # kernel width (s)
         sigma_k = sigma / dt_bin # kernel width (bins)
         return lambda x: 1/(2*math.pi*sigma_k**2)**0.5 * np.exp(-0.5 * x**2 / sigma_k**2)
     else:

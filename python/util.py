@@ -755,7 +755,8 @@ def find_data(mouse_id, files, ext='.mat', exclude_strs=[]):
 ### Array handling ###
 def in_interval(t, t1, t2, query='event', include_border=True):
     """
-    Determine which time points in a vector lie within the interval [t1, t2].
+    Determine which time points in a vector lie within the 
+    half-open interval [t1, t2).
 
     Args:
     - t (ndarray): 1D array containing time points to query.
@@ -772,7 +773,7 @@ def in_interval(t, t1, t2, query='event', include_border=True):
             1D array of which interval(s) contain the corresponding event indices 
     """
     gt_t1 = (t[np.newaxis, :] >= t1[:, np.newaxis])
-    lt_t2 = (t[np.newaxis, :] <= t2[:, np.newaxis])
+    lt_t2 = (t[np.newaxis, :] < t2[:, np.newaxis])
     bt_t1_t2 = np.logical_and(gt_t1, lt_t2)
 
     if query == 'event':

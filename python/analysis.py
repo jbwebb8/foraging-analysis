@@ -64,7 +64,7 @@ def get_lick_decisions(sess, min_interval=None):
 
     return t_decision
     
-def get_lick_stats(sess, per_patch=True):
+def get_lick_stats(sess, per_patch=True, min_interval=None):
     """
     Returns statistics for licking in vs. out of patch.
 
@@ -80,7 +80,7 @@ def get_lick_stats(sess, per_patch=True):
         - f_interpatch: lick decision rate in interpatch(es)
     """
     # Get timestamps associated with lick decisions
-    t_decision = get_lick_decisions(sess)
+    t_decision = get_lick_decisions(sess, min_interval=min_interval)
 
     # Get timestamps associated with patch entry/exit
     t_patch = sess.get_patch_times()
