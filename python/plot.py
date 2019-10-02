@@ -222,26 +222,34 @@ class Plotter:
         self.ax.set_xlabel('Session')
         self.ax.set_ylabel('Harvest Rate Difference per Patch (uL/s)')
 
-    def plot_residence_times(self, days, t_p_obs, t_p_opt, figsize=(10, 10), **kwargs):
+    def plot_residence_times(self, 
+                             days, 
+                             t_p_obs, 
+                             t_p_opt=None, 
+                             figsize=(10, 10),
+                             new_fig=True, 
+                             **kwargs):
         # Create new figure
-        self.create_new_figure(figsize=figsize)
+        if new_fig:
+            self.create_new_figure(figsize=figsize)
 
         # Plot observed data
         self.plot_learning_curve(days, t_p_obs, label='observed', **kwargs)
 
         # Plot optimal data
-        center = kwargs.get('center', 'mean')
-        day_range = kwargs.get('day_range', None)
-        t_p_opt_, days_ = get_patch_statistics(t_p_opt, 
-                                               ids=days, 
-                                               method=center,
-                                               return_all=False)
-        if day_range is None:
-            plot_idx = np.ones(len(days_), dtype=np.bool)
-        else:
-            plot_idx = np.logical_and(days_ >= day_range[0], days_ <= day_range[1])
-        self.ax.plot(days_[plot_idx], t_p_opt_[plot_idx], 
-                linestyle='--', color=self.cmap(0.10), label='optimal')
+        if t_p_opt is not None:
+            center = kwargs.get('center', 'mean')
+            day_range = kwargs.get('day_range', None)
+            t_p_opt_, days_ = get_patch_statistics(t_p_opt, 
+                                                ids=days, 
+                                                method=center,
+                                                return_all=False)
+            if day_range is None:
+                plot_idx = np.ones(len(days_), dtype=np.bool)
+            else:
+                plot_idx = np.logical_and(days_ >= day_range[0], days_ <= day_range[1])
+            self.ax.plot(days_[plot_idx], t_p_opt_[plot_idx], 
+                    linestyle='--', color=self.cmap(0.10), label='optimal')
 
         # Plot settings
         handles, labels = self.ax.get_legend_handles_labels()
@@ -253,9 +261,15 @@ class Plotter:
         xlim = self.ax.get_xlim()
         self.ax.set_xlim([xlim[0], xlim[1] + 5])
 
-    def plot_travel_times(self, days, t_t, figsize=(10, 10), **kwargs):
+    def plot_travel_times(self, 
+                          days, 
+                          t_t, 
+                          figsize=(10, 10), 
+                          new_fig=True,
+                          **kwargs):
         # Create new figure
-        self.create_new_figure(figsize=figsize)
+        if new_fig:
+            self.create_new_figure(figsize=figsize)
 
         # Plot observed data
         self.plot_learning_curve(days, t_t, **kwargs)
