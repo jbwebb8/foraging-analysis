@@ -445,7 +445,10 @@ class TTSession(Session):
         idx_pin = [v for k, v in self.settings['GPIO_labels'].items() 
                    if any([label.lower() in k.lower() for label in labels])]
 
-        return np.array(idx_pin).astype(np.int64)
+        if None in idx_pin:
+            raise UserWarning('Pin labels not available for session.')
+        else:
+            return np.array(idx_pin).astype(np.int64)
 
     def _load_motor_data(self):
         # Check requirements
@@ -476,14 +479,16 @@ class TTSession(Session):
         # Get GPIO pins
         pins = self._get_GPIO_pins('lick')
 
-        # Add motor traces
+        # Add lick traces
         lick = np.zeros([self.vars['T']])
         for pin in pins:
             lick += self.data['GPIO'][:, pin]
 
-        if (lick < 0).any() or (lick >  1).any():
-            raise ValueError('Lick trace cannot be interpreted due to'
-                             ' overlapping sensors and/or negative values.')
+        if (lick < 0).any():
+            raise UserWarning('Lick trace cannot be interpreted due to'
+                             ' negative values.')
+        elif (lick > 1).any():
+            warnings.warn('Licks detected simultaneously on multiple sensors.')
         else:
             return lick
 
@@ -501,7 +506,7 @@ class TTSession(Session):
         else:
             raise ValueError('Name \'%s\' not recognized.' % var_name)
 
-    def _get_patch_times_from_GPIO(self, fs=None, GPIO_labels=None):
+    def _get_patch_times_from_GPIO(self, fs=None, GPIO_labels=None, alternate=True):
         # Check requirements
         req_data = ['GPIO', 'fs']
         self._check_attributes(data_names=req_data)
@@ -549,16 +554,17 @@ class TTSession(Session):
         idx_patch = idx_patch[idx_sort]
 
         # Keep only alternating sequences
-        idx_keep = []
-        for i, pin in enumerate(pins):
-            if pin in pins_to_return:
-                # Find all occurences of patch i
-                idx_i = np.argwhere(idx_patch == i).flatten()
-                idx_keep_i = idx_i[np.argwhere(np.diff(idx_i) >= num_patches).flatten() + 1]
-                idx_keep_i = np.insert(idx_keep_i, 0, idx_i[0])
-                idx_keep.append(idx_keep_i)
-        idx_keep = np.sort(flatten_list(idx_keep)).astype(np.int64)
-        t_patch = t_patch[idx_keep, :]
+        if alternate:
+            idx_keep = []
+            for i, pin in enumerate(pins):
+                if pin in pins_to_return:
+                    # Find all occurences of patch i
+                    idx_i = np.argwhere(idx_patch == i).flatten()
+                    idx_keep_i = idx_i[np.argwhere(np.diff(idx_i) >= num_patches).flatten() + 1]
+                    idx_keep_i = np.insert(idx_keep_i, 0, idx_i[0])
+                    idx_keep.append(idx_keep_i)
+            idx_keep = np.sort(flatten_list(idx_keep)).astype(np.int64)
+            t_patch = t_patch[idx_keep, :]
 
         # Stop at t_stop
         t_stop = np.min(t_stop)
