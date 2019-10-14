@@ -1024,4 +1024,4 @@ def dec_to_bin_array(d, bits=None, bit_order='<'):
     elif bit_order == '>':
         return b[..., ::-1]
     else:
-        raise ValueError('Unknown bit order \'%s\'' % byte_order)
+        raise ValueError('Unknown bit order \'%s\'' % bit_order)
