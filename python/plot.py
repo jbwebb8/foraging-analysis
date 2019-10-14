@@ -86,13 +86,28 @@ class Plotter:
                             plot_traces=False,
                             plot_points=False):
 
-        def get_plot_idx(d):
-            if day_range is None:
-                return np.ones(len(d), dtype=np.bool)
-            elif len(day_range) == 2: # assume [min, max]
-                return np.logical_and(d >= day_range[0], d <= day_range[1])
-            else: # assume array of possible values
-                return np.isin(d, np.array(day_range))
+        def get_plot_idx(d, mouse_id=None):
+            if isinstance(day_range, dict): # dictionary of values per mouse
+                if mouse_id is not None:
+                    # Return values for particular mouse
+                    day_range_ = day_range[mouse_id]
+                else:
+                    # Return values for all mice
+                    plot_idx = []
+                    for mouse_id_, day_range_ in day_range.items():
+                        plot_idx.append(np.array(get_plot_idx(d, mouse_id_)))
+                    plot_idx = (np.sum(np.vstack(plot_idx), axis=0) > 0)
+                    return plot_idx
+            else:
+                # Otherwise, leave unchanged
+                day_range_ = day_range        
+
+            if day_range_ is None:
+                return np.ones(len(d), dtype=np.bool)            
+            elif len(day_range_) == 2: # assume [min, max]
+                return np.logical_and(d >= day_range_[0], d <= day_range_[1])
+            elif isinstance(day_range_, (list, np.ndarray)): # assume array of possible values
+                return np.isin(d, np.array(day_range_))
 
         # Convert to dictionary if needed (e.g. single animal data)
         if not isinstance(data, dict):
@@ -108,7 +123,7 @@ class Plotter:
                                                     ids=days[mouse_id], 
                                                     method=center,
                                                     return_all=False)
-                plot_idx = get_plot_idx(days_)
+                plot_idx = get_plot_idx(days_, mouse_id)
                 self.ax.plot(days_[plot_idx], 
                              data_[plot_idx], 
                              color=self.cmap((i+1)/n_mouse),
@@ -119,7 +134,7 @@ class Plotter:
                                                     ids=days[mouse_id], 
                                                     method=center,
                                                     return_all=True)
-                plot_idx = get_plot_idx(days_)
+                plot_idx = get_plot_idx(days_, mouse_id)
                 self.ax.scatter(days_[plot_idx], 
                                 data_[plot_idx], 
                                 color=self.cmap((i+1)/n_mouse),
