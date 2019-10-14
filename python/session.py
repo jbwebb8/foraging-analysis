@@ -123,7 +123,7 @@ class Session:
 
         return self.vars[var_name]
 
-    def _get_patch_times_from_signal(self, in_patch, fs):
+    def _get_patch_times_from_signal(self, in_patch, fs, drop_last=True):
         # Find patch start points
         t_patch_start = np.argwhere((in_patch - np.roll(in_patch, -1)) == -1).flatten()
         if (in_patch[-1] == 0) and (in_patch[0] == 1):
@@ -142,24 +142,38 @@ class Session:
             # Correct initial error
             t_patch_end = t_patch_end[1:]
         
-        # Drop last patch-interpatch sequence
-        if len(t_patch_start) > len(t_patch_end):
-            # End in patch: drop last patch
-            t_stop = t_patch_start[-1]
-            t_patch_start = t_patch_start[:-1]
-        elif len(t_patch_start) == len(t_patch_end):
-            # End in interpatch: drop last patch and interpatch
-            t_stop = t_patch_start[-1]
-            t_patch_start = t_patch_start[:-1]
-            t_patch_end = t_patch_end[:-1]
+        if drop_last:
+            # Drop last patch-interpatch sequence
+            if len(t_patch_start) > len(t_patch_end):
+                # End in patch: drop last patch
+                t_stop = t_patch_start[-1]
+                t_patch_start = t_patch_start[:-1]
+            elif len(t_patch_start) == len(t_patch_end):
+                # End in interpatch: drop last patch and interpatch
+                t_stop = t_patch_start[-1]
+                t_patch_start = t_patch_start[:-1]
+                t_patch_end = t_patch_end[:-1]
+            else:
+                raise ValueError('Timestamps not understood: %d patch starts, %d patch stops'
+                                % (len(t_patch_start), len(t_patch_end)))
         else:
-            raise ValueError('Timestamps not understood: %d patch starts, %d patch stops'
-                            % (len(t_patch_start), len(t_patch_end)))
-            
+            # Set t_stop accordingly
+            if len(t_patch_start) > len(t_patch_end):
+                # End in patch: stop at end of session, add to t_patch_end
+                t_stop = np.array([in_patch.size])
+                t_patch_end = np.append(t_patch_end, in_patch.size)
+            elif len(t_patch_start) == len(t_patch_end):
+                # End in interpatch: stop at end of session
+                t_stop = np.array([in_patch.size])
+            else:
+                raise ValueError('Timestamps not understood: %d patch starts, %d patch stops'
+                                % (len(t_patch_start), len(t_patch_end)))
+
+        # Scale to seconds
         t_patch_start = t_patch_start.astype(np.float64) / fs
         t_patch_end = t_patch_end.astype(np.float64) / fs
         t_patch = np.vstack([t_patch_start, t_patch_end]).T
-        t_stop = t_stop.astype(np.float64) / fs - 0.5 # to account for error
+        t_stop = t_stop.astype(np.float64) / fs #- 0.5 # to account for error
         
         return t_patch, t_stop
 
@@ -302,18 +316,17 @@ class Session:
 
             # Find patches in which rewards given
             pad = 0.5 # padding in seconds
-            #idx_patch = in_interval(self.vars['t_motor'],
-            #                        self.vars['t_patch'][:, 0]-pad,
-            #                        self.vars['t_patch'][:, 1]+pad,
-            #                        query='event')
-            #if (idx_patch > 1).any():
-            #    raise UserWarning('Motor times cannot be uniquely assigned'
-            #                      ' to individual patches.')
-            #idx_patch = idx_patch.astype(np.bool)
             _, idx_patch = in_interval(self.vars['t_motor'],
                                        self.vars['t_patch'][:, 0]-pad,
                                        self.vars['t_patch'][:, 1]+pad,
                                        query='event_interval')
+            n_patch = in_interval(self.vars['t_motor'],
+                                  self.vars['t_patch'][:, 0]-pad,
+                                  self.vars['t_patch'][:, 1]+pad,
+                                  query='event')
+            if (n_patch > 1).any():
+                raise UserWarning('Motor times cannot be uniquely assigned'
+                                  ' to individual patches.')
 
 
             # Calculate observed reward per patch
@@ -531,7 +544,7 @@ class TTSession(Session):
         for i, pin in enumerate(pins):
             # Get times for patch i
             in_patch_i = self.data['GPIO'][:, pin]
-            t_patch_i, t_stop_i = self._get_patch_times_from_signal(in_patch_i, fs)
+            t_patch_i, t_stop_i = self._get_patch_times_from_signal(in_patch_i, fs, drop_last=False)
 
             # Apply nose poke smoothing
             t_patch_i = self._smooth_patch_times(t_patch_i)
@@ -544,7 +557,7 @@ class TTSession(Session):
 
         # Combine patch times and patch IDs
         t_patch = np.vstack(t_patch)
-        idx_patch = np.hstack(idx_patch)
+        idx_patch = np.hstack(idx_patch).astype(np.int64)
         in_patch = np.sum(np.vstack(in_patch), axis=0)
         t_stop = np.array(t_stop)
 
@@ -553,8 +566,8 @@ class TTSession(Session):
         t_patch = t_patch[idx_sort, :]
         idx_patch = idx_patch[idx_sort]
 
-        # Keep only alternating sequences
         if alternate:
+            # Keep only alternating sequences
             idx_keep = []
             for i, pin in enumerate(pins):
                 if pin in pins_to_return:
@@ -565,10 +578,11 @@ class TTSession(Session):
                     idx_keep.append(idx_keep_i)
             idx_keep = np.sort(flatten_list(idx_keep)).astype(np.int64)
             t_patch = t_patch[idx_keep, :]
+            idx_patch = idx_patch[idx_keep]
 
-        # Stop at t_stop
-        t_stop = np.min(t_stop)
-        t_patch = t_patch[t_patch[:, 1] <= t_stop, :]
+        # Drop last patch-interpatch sequence
+        t_stop = t_patch[-1, 0]
+        t_patch = t_patch[:-1, :]
 
         return t_patch, in_patch, t_stop
 
@@ -598,7 +612,7 @@ class TTSession(Session):
             elif i == len(t_patch) - 2:
                 # Avoid error at end of list
                 break
-            elif t_patch[i+2] - t_patch[i+1] < exit_delay:
+            elif t_patch[i+2] - t_patch[i+1] <= exit_delay:
                 # Merge with next patch if min exit period not met
                 del t_patch[i+1:i+3]
             else:
@@ -655,7 +669,7 @@ class TTSession(Session):
         t_p_opt, r_opt = get_optimal_values(t_t=t_t_min, R_0=R_0, r_0=r_0, tau=tau)
         
         if return_all:
-            return r_opt / (t_p_opt + t_t), r_opt, t_p_opt, t_t
+            return r_opt / (t_p_opt + t_t), r_opt, t_p_opt, t_t_min
         else:
             return r_opt / (t_p_opt + t_t)
         
