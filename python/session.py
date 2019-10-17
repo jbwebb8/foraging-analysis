@@ -302,8 +302,17 @@ class Session:
             # Requirements
             required_vars = ['t_patch', 't_motor', 'dt_motor']
             self._check_attributes(var_names=required_vars)
+
+            # Get segment durations
+            t_seg = self._get_segment_durations()
+
+            # Check for invalid session
             if self.vars['t_motor'].size == 0:
-                return np.zeros(self.vars['t_patch'].shape[0])
+                hr = np.zeros(self.vars['t_patch'].shape[0])
+                if return_all:   
+                    return (hr, hr, t_seg)
+                else:
+                    return hr
             
             # Filter logged reward volumes by those given
             r_log = self.get_reward_volumes()
@@ -337,7 +346,6 @@ class Session:
                 r_patch_obs[i] = np.sum(r_log[idx_patch == i]) # logged volumes
 
             # Divide reward per patch by segment time (patch + next interpatch)
-            t_seg = self._get_segment_durations()
             hr_patch_obs = r_patch_obs / t_seg
 
             if return_all:
@@ -672,7 +680,27 @@ class TTSession(Session):
             return r_opt / (t_p_opt + t_t), r_opt, t_p_opt, t_t_min
         else:
             return r_opt / (t_p_opt + t_t)
+
+    def calculate_reward_times(self):
+        """
+        Calculate the reward times within a patch by integrating
+        an exponential decay function.
+        """
+        # Parameters
+        tau = self.params['Reward']['tau']
+        r_0 = self.params['Reward']['r_0']
+        R_0 = self.params['Reward']['R_0']
+
+        # Calculate pre-determined reward times
+        n = np.arange(int(tau*r_0/R_0)) # max number of rewards
+        t_reward = -tau*np.log(1.0 - (n*R_0)/(tau*r_0)) # seconds
+
+        # Add task-specific delays
+        t_reward += (self.params['Delay']['FirstBetweenDispensingDelay']
+                    + np.arange(1, len(n)+1) * self.params['Delay']['PreDispenseToneDelay']
+                    + np.arange(0, len(n))   * sum([self.params['Delay']['PostDispenseDelay'], self.params['Delay']['PostDispenseToneDelay']]))/1000
         
+        return t_reward
 
 
 class LVSession(Session):
