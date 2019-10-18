@@ -17,3 +17,6 @@ notebooks/token.pickle
 # config files
 config/*
 !config/template.json
+
+# DLC
+dlc/*

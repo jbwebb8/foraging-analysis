@@ -21,6 +21,9 @@ class Plotter:
         # Initial figure
         self.fig = None
 
+    def set_cmap(self, name):
+        self.cmap = plt.get_cmap(name)
+
     def create_new_figure(self, figsize=(15, 15), rows=1, cols=1):
         # Clear old figure
         plt.close('all')
@@ -47,9 +50,29 @@ class Plotter:
     def set_current_axis(self, idx):
         # Numpy arrays support variable number of indices if
         # provided as tuple
-        if not isinstance(idx, tuple):
+        if isinstance(idx, list):
             idx = tuple(idx)
         self.ax = self.axes[idx]
+
+    def set_yscale(self, scale, all_axes=True):
+        if all_axes:
+            axes_ = self.axes[self.show].flatten()
+        else:
+            axes_ = [self.ax]
+
+        for ax_ in axes_:
+            ax_.set_yscale(scale)
+
+    def set_xscale(self, scale, all_axes=True):
+        if all_axes:
+            axes_ = self.axes[self.show].flatten()
+        else:
+            axes_ = [self.ax]
+
+        for ax_ in axes_:
+            ax_.set_xscale(scale)
+
+    
 
     def plot_learning_curve(self,
                             days,
@@ -57,16 +80,34 @@ class Plotter:
                             day_range=None,
                             center='median',
                             err='sem',
+                            err_plot='bar',
                             label=None,
                             c=0.5,
                             plot_traces=False,
                             plot_points=False):
 
-        def get_plot_idx(d):
-            if day_range is None:
-                return np.ones(len(d), dtype=np.bool)
+        def get_plot_idx(d, mouse_id=None):
+            if isinstance(day_range, dict): # dictionary of values per mouse
+                if mouse_id is not None:
+                    # Return values for particular mouse
+                    day_range_ = day_range[mouse_id]
+                else:
+                    # Return values for all mice
+                    plot_idx = []
+                    for mouse_id_, day_range_ in day_range.items():
+                        plot_idx.append(np.array(get_plot_idx(d, mouse_id_)))
+                    plot_idx = (np.sum(np.vstack(plot_idx), axis=0) > 0)
+                    return plot_idx
             else:
-                return np.logical_and(d >= day_range[0], d <= day_range[1])
+                # Otherwise, leave unchanged
+                day_range_ = day_range        
+
+            if day_range_ is None:
+                return np.ones(len(d), dtype=np.bool)            
+            elif len(day_range_) == 2: # assume [min, max]
+                return np.logical_and(d >= day_range_[0], d <= day_range_[1])
+            elif isinstance(day_range_, (list, np.ndarray)): # assume array of possible values
+                return np.isin(d, np.array(day_range_))
 
         # Convert to dictionary if needed (e.g. single animal data)
         if not isinstance(data, dict):
@@ -82,7 +123,7 @@ class Plotter:
                                                     ids=days[mouse_id], 
                                                     method=center,
                                                     return_all=False)
-                plot_idx = get_plot_idx(days_)
+                plot_idx = get_plot_idx(days_, mouse_id)
                 self.ax.plot(days_[plot_idx], 
                              data_[plot_idx], 
                              color=self.cmap((i+1)/n_mouse),
@@ -93,7 +134,7 @@ class Plotter:
                                                     ids=days[mouse_id], 
                                                     method=center,
                                                     return_all=True)
-                plot_idx = get_plot_idx(days_)
+                plot_idx = get_plot_idx(days_, mouse_id)
                 self.ax.scatter(days_[plot_idx], 
                                 data_[plot_idx], 
                                 color=self.cmap((i+1)/n_mouse),
@@ -117,19 +158,39 @@ class Plotter:
                                             ids=days, 
                                             method=err, 
                                             return_all=False)
-        y_err = np.vstack([np.zeros(len(data_err)), data_err])
         plot_idx = get_plot_idx(days_)
-        self.ax.errorbar(days_[plot_idx], 
+        if err_plot.lower() == 'bar':
+            y_err = np.vstack([np.zeros(len(data_err)), data_err])
+            self.ax.errorbar(days_[plot_idx], 
+                            data_[plot_idx], 
+                            yerr=y_err[:, plot_idx], 
+                            color=self.cmap(c),
+                            marker='o',
+                            capsize=5,
+                            label=label)
+        elif err_plot.lower() == 'fill':
+            y_err_low = data_[plot_idx] - data_err[plot_idx]
+            y_err_high = data_[plot_idx] + data_err[plot_idx]
+            self.ax.plot(days_[plot_idx], 
                          data_[plot_idx], 
-                         yerr=y_err[:, plot_idx], 
                          color=self.cmap(c),
-                         marker='o',
-                         capsize=5,
+                         linewidth=3,
                          label=label)
+            self.ax.fill_between(days_[plot_idx],
+                                 y1=y_err_low,
+                                 y2=y_err_high,
+                                 color=self.cmap(c),
+                                 alpha=0.5)
 
-    def plot_harvest_rates(self, days, hr, figsize=(10, 10), **kwargs):
+    def plot_harvest_rates(self, 
+                           days, 
+                           hr, 
+                           figsize=(10, 10), 
+                           new_fig=True, 
+                           **kwargs):
         # Create new figure
-        self.create_new_figure(figsize=figsize)
+        if new_fig:
+            self.create_new_figure(figsize=figsize)
 
         # Heavy lifting
         self.plot_learning_curve(days, hr, **kwargs)
@@ -176,26 +237,34 @@ class Plotter:
         self.ax.set_xlabel('Session')
         self.ax.set_ylabel('Harvest Rate Difference per Patch (uL/s)')
 
-    def plot_residence_times(self, days, t_p_obs, t_p_opt, figsize=(10, 10), **kwargs):
+    def plot_residence_times(self, 
+                             days, 
+                             t_p_obs, 
+                             t_p_opt=None, 
+                             figsize=(10, 10),
+                             new_fig=True, 
+                             **kwargs):
         # Create new figure
-        self.create_new_figure(figsize=figsize)
+        if new_fig:
+            self.create_new_figure(figsize=figsize)
 
         # Plot observed data
         self.plot_learning_curve(days, t_p_obs, label='observed', **kwargs)
 
         # Plot optimal data
-        center = kwargs.get('center', 'mean')
-        day_range = kwargs.get('day_range', None)
-        t_p_opt_, days_ = get_patch_statistics(t_p_opt, 
-                                               ids=days, 
-                                               method=center,
-                                               return_all=False)
-        if day_range is None:
-            plot_idx = np.ones(len(days_), dtype=np.bool)
-        else:
-            plot_idx = np.logical_and(days_ >= day_range[0], days_ <= day_range[1])
-        self.ax.plot(days_[plot_idx], t_p_opt_[plot_idx], 
-                linestyle='--', color=self.cmap(0.10), label='optimal')
+        if t_p_opt is not None:
+            center = kwargs.get('center', 'mean')
+            day_range = kwargs.get('day_range', None)
+            t_p_opt_, days_ = get_patch_statistics(t_p_opt, 
+                                                ids=days, 
+                                                method=center,
+                                                return_all=False)
+            if day_range is None:
+                plot_idx = np.ones(len(days_), dtype=np.bool)
+            else:
+                plot_idx = np.logical_and(days_ >= day_range[0], days_ <= day_range[1])
+            self.ax.plot(days_[plot_idx], t_p_opt_[plot_idx], 
+                    linestyle='--', color=self.cmap(0.10), label='optimal')
 
         # Plot settings
         handles, labels = self.ax.get_legend_handles_labels()
@@ -204,13 +273,18 @@ class Plotter:
         self.ax.set_title('Patch Residence Times across Sessions')
         self.ax.set_xlabel('Session')
         self.ax.set_ylabel('Patch Residence Time (s)')
-        self.ax.set_yscale('log')
         xlim = self.ax.get_xlim()
         self.ax.set_xlim([xlim[0], xlim[1] + 5])
 
-    def plot_travel_times(self, days, t_t, figsize=(10, 10), **kwargs):
+    def plot_travel_times(self, 
+                          days, 
+                          t_t, 
+                          figsize=(10, 10), 
+                          new_fig=True,
+                          **kwargs):
         # Create new figure
-        self.create_new_figure(figsize=figsize)
+        if new_fig:
+            self.create_new_figure(figsize=figsize)
 
         # Plot observed data
         self.plot_learning_curve(days, t_t, **kwargs)
@@ -220,7 +294,6 @@ class Plotter:
         self.ax.set_title('Travel Times across Sessions')
         self.ax.set_xlabel('Session')
         self.ax.set_ylabel('Travel Time (s)')
-        self.ax.set_yscale('log')
         xlim = self.ax.get_xlim()
         self.ax.set_xlim([xlim[0], xlim[1] + 5])
 
@@ -416,6 +489,241 @@ class Plotter:
                              color=color,
                              alpha=0.3*alpha,
                              **kwargs)
+
+    def bar_graph_by_condition(self, 
+                               data, 
+                               cond, 
+                               cond_params,
+                               exclude_cond=[],
+                               cond_order=None,
+                               center='median',
+                               err='sem',
+                               c=0.5,
+                               figsize=(15, 15),
+                               new_fig=True,
+                               plot_subjects=True):
+        # Create new figure
+        if new_fig:
+            self.create_new_figure(figsize=figsize)
+        
+        # Convert to dictionary if needed (e.g. single animal data)
+        if not isinstance(data, dict):
+            data = {'mouse': data}
+            cond = {'mouse': cond}
+
+        # Find plot order of conditions
+        if cond_order is None:
+            cond_order = np.arange(len(cond_params) - len(exclude_cond))
+        else:
+            assert len(cond_order) == len(cond_params) - len(exclude_cond)
+            if not isinstance(cond_order, np.ndarray):
+                cond_order = np.array(cond_order)
+            gt = (cond_order[np.newaxis, :] > np.array(exclude_cond)[:, np.newaxis])
+            cond_order -= np.sum(gt, axis=0)
+        
+        # Plot data over animals, conditions
+        pvalues = {}
+        if plot_subjects:
+            for i, mouse_id in enumerate(data.keys()):
+                # Get all data
+                d_all, cond_all = get_patch_statistics(data[mouse_id],
+                                                    ids=cond[mouse_id],
+                                                    return_all=True)
+                
+                # Get patch statistics by experimental condition
+                d_plot, cond_plot = get_patch_statistics(data[mouse_id], 
+                                                    ids=cond[mouse_id], 
+                                                    method=center, 
+                                                    return_all=False)
+                d_err, cond_plot = get_patch_statistics(data[mouse_id], 
+                                                    ids=cond[mouse_id], 
+                                                    method=err, 
+                                                    return_all=False)
+
+                # Exclude condition data
+                idx = ~np.isin(cond_all, exclude_cond)
+                d_all = d_all[idx]
+                cond_all = cond_all[idx]
+                idx = ~np.isin(cond_plot, exclude_cond)
+                d_plot = d_plot[idx]
+                d_err = d_err[idx]
+                cond_plot = cond_plot[idx]
+
+                # Plot statistic
+                x = np.arange(len(cond_plot)) + i*(len(cond_plot) + 1)
+                yerr = np.vstack([np.zeros(len(d_err)), d_err])
+                self.ax.bar(x, 
+                            d_plot[cond_order], 
+                            yerr=yerr[:, cond_order],
+                            color=self.cmap(c))
+
+                # Format axis
+                if (i == 0):
+                    # Note: This only works if plt.tight_layout() is called after
+                    # all subplots have finished. Otherwise, it will call plt.draw(),
+                    # which automatically sets tick labels. 
+                    self.ax.set_xticks([]) # clear default ticks
+                    self.ax.set_xticklabels([]) # clear default labels
+                xticks = self.ax.get_xticks()
+                self.ax.set_xticks(list(xticks) + list(x))
+                xtick_labels = [label._text for label in self.ax.get_xticklabels()
+                                if label._text != '']
+                new_labels = [', '.join([str(p) for p in params]) for key, params in cond_params.items()
+                        if key not in exclude_cond]
+                new_labels = [new_labels[i] for i in cond_order] # reorder conditions
+                new_labels[0] = '{}\n'.format(mouse_id) + new_labels[0]
+                self.ax.set_xticklabels(xtick_labels + new_labels)
+
+        # Plot combined data
+        # Get consolidated data across animals
+        d_plot, cond_plot = get_patch_statistics(data, 
+                                            ids=cond, 
+                                            method=center, 
+                                            return_all=False)
+        d_err, cond_plot = get_patch_statistics(data, 
+                                            ids=cond, 
+                                            method=center, 
+                                            return_all=False)
+        
+        # Exclude condition data
+        idx = ~np.isin(cond_plot, exclude_cond)
+        d_plot = d_plot[idx]
+        d_err = d_err[idx]
+        cond_plot = cond_plot[idx]
+
+        # Plot consolidated data
+        x = np.arange(len(cond_plot)) + plot_subjects*len(data.keys())*(len(cond_plot) + 1)
+        yerr = np.vstack([np.zeros(len(d_err)), d_err])
+        self.ax.bar(x, 
+                    d_plot[cond_order], 
+                    yerr=yerr[:, cond_order],
+                    color=self.cmap(c))
+        if not plot_subjects:
+            self.ax.set_xticks([]) # clear default ticks
+            self.ax.set_xticklabels([]) # clear default labels
+        xticks = self.ax.get_xticks()
+        self.ax.set_xticks(list(xticks) + list(x))
+        xtick_labels = [label._text for label in self.ax.get_xticklabels()
+                        if label._text != '']
+        new_labels = [', '.join([str(p) for p in params]) for key, params in cond_params.items()
+                    if key not in exclude_cond]
+        new_labels = [new_labels[i] for i in cond_order] # reorder conditions
+        new_labels[0] = '{}\n'.format('all') + new_labels[0]
+        self.ax.set_xticklabels(xtick_labels + new_labels, rotation=45, ha='right')
+
+    def plot_by_condition(self, 
+                          data, 
+                          cond, 
+                          cond_params,
+                          exclude_cond=[],
+                          cond_order=None,
+                          center='median',
+                          err='sem',
+                          c=0.5,
+                          figsize=(15, 15),
+                          new_fig=True,
+                          plot_subjects=True,
+                          capsize=None,
+                          markersize=None,
+                          linewidth=None):
+        # Create new figure
+        if new_fig:
+            self.create_new_figure(figsize=figsize)
+        
+        # Convert to dictionary if needed (e.g. single animal data)
+        if not isinstance(data, dict):
+            data = {'mouse': data}
+            cond = {'mouse': cond}
+
+        # Find plot order of conditions
+        if cond_order is None:
+            cond_order = np.arange(len(cond_params) - len(exclude_cond))
+        else:
+            assert len(cond_order) == len(cond_params) - len(exclude_cond)
+            if not isinstance(cond_order, np.ndarray):
+                cond_order = np.array(cond_order)
+            gt = (cond_order[np.newaxis, :] > np.array(exclude_cond)[:, np.newaxis])
+            cond_order -= np.sum(gt, axis=0)
+        
+        # Plot data over animals, conditions
+        if plot_subjects:
+            for i, mouse_id in enumerate(data.keys()):
+                # Get all data
+                d_all, cond_all = get_patch_statistics(data[mouse_id],
+                                                    ids=cond[mouse_id],
+                                                    return_all=True)
+
+                # Get patch statistics by experimental condition
+                d_plot, cond_plot = get_patch_statistics(data[mouse_id], 
+                                                    ids=cond[mouse_id], 
+                                                    method=center, 
+                                                    return_all=False)
+                d_err, cond_plot = get_patch_statistics(data[mouse_id], 
+                                                    ids=cond[mouse_id], 
+                                                    method=err, 
+                                                    return_all=False)
+
+                # Exclude condition data
+                idx = ~np.isin(cond_all, exclude_cond)
+                d_all = d_all[idx]
+                cond_all = cond_all[idx]
+                idx = ~np.isin(cond_plot, exclude_cond)
+                d_plot = d_plot[idx]
+                d_err = d_err[idx]
+                cond_plot = cond_plot[idx]
+                
+                # Plot statistic
+                x = np.arange(len(cond_plot))
+                self.ax.plot(x, 
+                        d_plot[cond_order], 
+                        color=self.cmap((i)/len(data.keys())),
+                        linewidth=linewidth,
+                        marker='o',
+                        markersize=markersize,
+                        label=mouse_id)
+
+        # Plot combined data  
+        # Get consolidated data across animals
+        d_plot, cond_plot = get_patch_statistics(data, 
+                                            ids=cond, 
+                                            method=center, 
+                                            return_all=False)
+        d_err, cond_plot = get_patch_statistics(data, 
+                                            ids=cond, 
+                                            method=err, 
+                                            return_all=False)
+
+        # Exclude condition data
+        idx = ~np.isin(cond_plot, exclude_cond)
+        d_plot = d_plot[idx]
+        d_err = d_err[idx]
+        cond_plot = cond_plot[idx]
+
+        # Plot statistic
+        x = np.arange(len(cond_plot))
+        yerr = d_err
+        self.ax.errorbar(x, 
+                    d_plot[cond_order], 
+                    yerr=yerr[cond_order],
+                    color=self.cmap(0.0),
+                    linewidth=2*linewidth,
+                    capsize=capsize,
+                    marker='o',
+                    markersize=markersize,
+                    label='all')
+
+        if plot_subjects:
+            # Add legend, removing error bar
+            handles, labels = self.ax.get_legend_handles_labels()
+            handles = [h for h in handles[:-1]] + [handles[-1][0]]
+            self.ax.legend(handles, labels, markerscale=0.1)
+
+        # Set axis labels
+        self.ax.set_xticks(x)
+        new_labels = [', '.join([str(p) for p in params]) for key, params in cond_params.items()
+                      if key not in exclude_cond]
+        new_labels = [new_labels[i] for i in cond_order] # reorder conditions
+        self.ax.set_xticklabels(new_labels, rotation=45, ha='right')
 
     def save_figure(self, filepath, ext='pdf', dpi=None):
         plt.savefig(filepath, format=ext, dpi=dpi)
