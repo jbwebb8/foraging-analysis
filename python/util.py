@@ -7,15 +7,21 @@ from tempfile import TemporaryFile
 import json
 
 # Google Drive API
-import pickle
-import os.path
-from googleapiclient.discovery import build
-from google_auth_oauthlib.flow import InstalledAppFlow
-from google.auth.transport.requests import Request
-from googleapiclient.errors import HttpError
+try:
+    import pickle
+    import os.path
+    from googleapiclient.discovery import build
+    from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.auth.transport.requests import Request
+    from googleapiclient.errors import HttpError
+except ModuleNotFoundError as e:
+    print(e, 'Some Google Drive API methods may not be available.')
 
 # Numerical
 import numpy as np
+
+# Plotting
+import matplotlib.pyplot as plt
 
 ### General utility functions ###
 def _check_list(names):
@@ -1025,3 +1031,359 @@ def dec_to_bin_array(d, bits=None, bit_order='<'):
         return b[..., ::-1]
     else:
         raise ValueError('Unknown bit order \'%s\'' % bit_order)
+
+
+### Media Objects ###
+import subprocess as sp
+import multiprocessing as mp
+import tempfile
+import shutil
+import time
+import glob
+import imageio
+from matplotlib.ticker import NullLocator
+
+class VideoAnnotator:
+    
+    def __init__(self,
+                 input_filename,
+                 annotate_fn,
+                 annotate_kwargs={},
+                 output_filename=None,
+                 output_resolution=None,
+                 fps=None,
+                 chunk_size=60,
+                 frame_limit=1000):
+        # Name settings
+        self.filename = input_filename
+        self.video_format = input_filename.split('.')[-1]
+        if output_filename is None:
+            base_filename = ''.join(input_filename.split('.')[0:-1])
+            self.output_filename = '.'.join([base_filename + '_annotated',
+                                            self.video_format])
+        elif not output_filename.endswith(self.video_format):
+            raise ValueError('Output must be same format as input.')
+        else:
+            self.output_filename = output_filename
+            
+        # Create reader
+        self.reader = VideoReader(input_filename)
+        
+        # Video settings
+        if output_resolution is None:
+            self.output_res = self.reader.get_metadata('resolution')
+        else:
+            self.output_res = output_resolution
+        if fps is None:
+            self.fps = self.reader.get_metadata('fps')
+        else:
+            self.fps = fps
+        
+        # Annotation settings
+        self._annotate_fn = annotate_fn
+        self._annotate_kwargs = annotate_kwargs
+
+        # Runtime settings
+        self.chunk_size = chunk_size # seconds
+        self.frame_limit = frame_limit # max frames to load per worker
+        
+        # Get video duration in seconds
+        self.duration = self.reader.get_metadata('duration')
+        self.num_processes = int((self.duration // self.chunk_size) + (self.duration % self.chunk_size > 0))
+        
+    def run(self, max_workers=2, verbose=True):
+        # Create temporary directory
+        self.temp_dir = tempfile.mkdtemp()
+        
+        # Initialize workers
+        workers = [] # list of current jobs
+        n = 0 # job number
+        q = mp.Queue() # queue to store results
+        for i in range(min(max_workers, self.num_processes)):
+            p = mp.Process(target=self._process_chunk, 
+                           args=(i, q), 
+                           name='{}-{} seconds'.format(n*self.chunk_size, (n+1)*self.chunk_size))
+            if verbose:
+                print('starting process {}'.format(p.name))
+            p.start()
+            workers.append(p)
+            n += 1
+            
+        while True:
+            # Check for finished jobs
+            for i, p in enumerate(workers):
+                if p.exitcode is not None: # process finished
+                    if verbose:
+                        print('finished process {}'.format(p.name))
+                    if n < self.num_processes:
+                        # Delete finished process
+                        del p
+                        
+                        # Add next process
+                        p = mp.Process(target=self._process_chunk, 
+                                       args=(n, q), 
+                                       name='{}-{} seconds'.format(n*self.chunk_size, (n+1)*self.chunk_size))
+                        print('starting process {}'.format(p.name))
+                        p.start()
+                        workers[i] = p
+                        n += 1
+                    else:
+                        # Delete finished process and trim list
+                        del workers[i]
+            
+            # Stop when no more jobs remain
+            if len(workers) == 0:
+                break
+                
+        # Get video chunk filenames and order
+        p_order = []
+        chunk_filenames = []
+        while not q.empty():
+            (i, name) = q.get()
+            p_order.append(i)
+            chunk_filenames.append(name)
+        sort_idx = [i[0] for i in sorted(enumerate(p_order), key=lambda x: x[1])]
+        
+        # Stitch videos together
+        # (see https://stackoverflow.com/a/11175851/8066298)
+        list_filename = '/'.join([self.temp_dir, 'video_list.txt'])
+        with open(list_filename, 'w') as f:
+            for name in [chunk_filenames[i] for i in sort_idx]:
+                f.write('file {}/{}'.format(self.temp_dir, name))
+                f.write('\n')
+                f.write('duration {:.2f}'.format(self.chunk_size))
+                f.write('\n\n')
+        cmd = ['ffmpeg',
+               '-v', 'error',
+               '-f', 'concat',
+               '-safe', '0',
+               '-i', list_filename,
+               '-c', 'copy',
+               '-s', '{}x{}'.format(*self.output_res),
+               self.output_filename]
+        with sp.Popen(cmd, stderr=sp.PIPE) as p:
+            self._run_process(p)
+        
+        # Delete temporary directory when finished
+        shutil.rmtree(self.temp_dir)
+
+    def _process_chunk(self, n, q):
+        # Create decoder for chunk
+        t_start = n*self.chunk_size
+        t_stop = t_start + self.chunk_size
+        reader = VideoReader(self.filename,
+                             t_start=t_start,
+                             t_stop=t_stop,
+                             max_frames=self.frame_limit)
+        
+        # Create encoder for chunk
+        chunk_filename = 'video-{:04d}.{}'.format(n, self.video_format)
+        cmd = ['ffmpeg',
+               '-v', 'error',
+               '-vcodec', 'mjpeg',
+               '-f', 'image2pipe',
+               '-i', '-',
+               '-vcodec', 'mpeg4',
+               '-framerate', '{:d}'.format(int(self.fps)),
+               '-s', '{}x{}'.format(*self.output_res),
+               '{}/{}'.format(self.temp_dir, chunk_filename)]
+        writer = sp.Popen(cmd, stdin=sp.PIPE)
+        
+        # Iterate through decoded frames for annotation
+        num_frames = int(self.chunk_size*self.fps)
+        for i in range(num_frames):
+            # Get frame
+            frame = reader.next_frame()
+            
+            # Find global frame number
+            n_frame = int(n*self.chunk_size*self.fps + i)
+            
+            # Annotate frame
+            fig = self._annotate_frame(n_frame, frame)
+            
+            # Save annotated frame to encoder stdin
+            fig.savefig(writer.stdin,
+                        format='JPEG',
+                        bbox_inches='tight', 
+                        pad_inches=0, 
+                        dpi=96)
+            #plt.close(fig)
+            del fig
+        
+        # Check to make sure no frames are left in segment
+        if reader.next_frame() is not None:
+            raise UserWarning('Some frames may be skipped in chunk {}.'.format(n))
+        
+        # Place video filename in queue
+        q.put([n, chunk_filename])
+        
+        # Wait for encoder to finish
+        writer.stdin.close()
+        writer.wait()
+            
+    def _run_process(self, p):
+        c = p.wait()
+        if c > 0:
+            print(p.stderr.read(10000).decode())
+            raise RuntimeError('The subprocess {} exited with return code {}.'
+                               .format(' '.join(p.args), c))
+    
+    def _annotate_frame(self, n_frame, frame):
+        # Get frame dimensions
+        #height, width, channel = frame.shape
+        width, height = self.output_res
+        
+        # Create matplotlib figure from image data
+        # (for figure sizes, see https://stackoverflow.com/a/13714720/8066298)
+        fig, ax = plt.subplots(figsize=(width/96, height/96), dpi=96)
+        ax.imshow(frame)
+        
+        # Annotate frame as specified
+        self._annotate_fn(n_frame, ax, **self._annotate_kwargs)
+        
+        # Remove borders
+        # (see https://stackoverflow.com/a/27227718/8066298)
+        ax.set_axis_off()
+        plt.subplots_adjust(top=1, bottom=0, right=1, left=0, 
+                            hspace=0, wspace=0)
+        plt.margins(0,0)
+        ax.xaxis.set_major_locator(NullLocator())
+        ax.yaxis.set_major_locator(NullLocator())
+        
+        # Return annotate figure
+        return fig
+
+
+class VideoReader:
+    # Improvements:
+    # - Change max_frames to max_memory by estimating how much memory each frame will use
+    
+    def __init__(self,
+                 input_filename,
+                 t_start=0.0,
+                 t_stop=None,
+                 max_frames=1000 # max number of frames to load at a time
+                ):
+        # Settings
+        self.input_filename = input_filename
+        self.t_start = t_start
+        if t_stop is None:
+            self.t_stop = self.get_metadata('duration')
+        else:
+            self.t_stop = t_stop
+        
+        # Frame attributes
+        self._width = self._resolution[0]
+        self._height = self._resolution[1]
+        self._channels = 3 # hard-coded; see +rgb24 flag in _load_frames()
+        self.frame_size = self._width*self._height*self._channels
+            
+        # Memory mangagement
+        self.max_frames = max_frames
+        self._sp = None
+        
+        # Compute time chunk size to load
+        self._dt_chunk = self.max_frames / self._fps
+        self._t = self.t_start # pointer to current time
+    
+    def get_metadata(self, query):
+        if query.lower() == 'duration':
+            return self._duration
+        elif query.lower() == 'resolution':
+            return self._resolution
+        elif query.lower() == 'fps':
+            return self._fps
+    
+    @property
+    def _duration(self):
+        cmd = ['ffprobe',
+               '-v', 'error',
+               '-i', self.input_filename,
+               '-select_streams', 'v',
+               '-show_entries', 'format=duration',
+               '-of', 'csv=p=0']
+        return float(self._run_metadata_command(cmd))
+    
+    @property
+    def _resolution(self):
+        cmd = ['ffprobe',
+               '-v', 'error',
+               '-i', self.input_filename,
+               '-select_streams', 'v',
+               '-show_entries', 'stream=width,height',
+               '-of', 'csv=p=0']
+        s = self._run_metadata_command(cmd).strip(' \n')
+        return [int(d) for d in s.split(',')]
+    
+    @property
+    def _fps(self):
+        cmd = ['ffprobe',
+               '-v', 'error',
+               '-i', self.input_filename,
+               '-select_streams', 'v',
+               '-show_entries', 'stream=avg_frame_rate',
+               '-of', 'csv=p=0']
+        s = self._run_metadata_command(cmd).strip(' \n')
+        return float(s.split('/')[0]) / float(s.split('/')[1])
+             
+    def _run_metadata_command(self, cmd, bufsize=100):
+        with sp.Popen(cmd, bufsize=bufsize, stdout=sp.PIPE, stderr=sp.PIPE) as p:
+            p.wait() # waits until process has terminated
+            s = p.stdout.read(bufsize).decode()
+            
+        return s
+    
+    def _run_pipe_command(self, cmd):
+        # Begin running process, but do not wait for it to finish
+        return sp.Popen(cmd,
+                        bufsize=None,
+                        stdout=sp.PIPE,
+                        stderr=sp.PIPE)
+
+    def next_frame(self):
+        # Check to see if video loaded in memory
+        if self._sp is None:
+            self._load_frames()
+        
+        # Read next frame from bytes
+        frame = self._sp.stdout.read(self.frame_size)
+        
+        if len(frame) > 0:
+            # Return next frame if pipe not empty 
+            frame = np.frombuffer(frame, dtype='uint8')
+            return frame.reshape([self._height, self._width, self._channels], order='C')
+        elif self._t < self.t_stop:
+            # Load next set of frames if pipe empty
+            self._load_frames()
+            return self.next_frame()
+        else:
+            # Return null object if reached end of video
+            return None
+        
+    def _load_frames(self):
+        """Loads video frames into memory by directing ffmpeg output to stdout of subprocess."""
+        # Check for end of video
+        if self._t >= self.t_stop:
+            raise RuntimeError('Reached end of video segment.')
+        
+        # Close current pipe
+        del self._sp
+                
+        # Begin piping output to stdout
+        dt_chunk = min(self._dt_chunk, self.t_stop - self._t)
+        pad = 1.00 # pad to help accurate seeking
+        cmd = ['ffmpeg',
+               '-v', 'error',
+               '-ss', '{:.2f}'.format(self._t - pad),
+               '-i', self.input_filename,
+               '-ss', '{:.2f}'.format(pad - 0.01),
+               '-t', '{:.2f}'.format(dt_chunk - 0.01),
+               '-f', 'image2pipe',
+               '-pix_fmt', '+rgb24', # throw error if rgb24 unavailable
+               '-vcodec', 'rawvideo', # stream frame pixels only
+               '-' # pipe to stdout
+              ]
+        self._sp = self._run_pipe_command(cmd)
+        
+        # Increment time pointer
+        self._t += dt_chunk     
