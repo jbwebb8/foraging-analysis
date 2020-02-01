@@ -5,6 +5,7 @@ import struct
 import time
 from tempfile import TemporaryFile
 import json
+import gc
 
 # Google Drive API
 try:
@@ -385,15 +386,24 @@ class GoogleDriveService:
             # Parent must be string if either name or ID provided
             assert isinstance(parent, str)
             try: # convert parent name to folder ID
-                parent = self.get_folder_ids(foldername=parent, exact_match=True)
-                parent = ','.join(parent)
+                parents = self.get_folder_ids(foldername=parent, exact_match=True)
+                #parent = ','.join(parent)
             except SyntaxError: # assume parent ID provided
-                pass
+                parents = [parent]
+
+            # In case of multiple folders matching parent name, 
+            # create list of parent queries
+            p = "("
+            for parent in parents[:-1]:
+                p += "'{}' in parents or ".format(parent)
+            p += "'{}' in parents)".format(parents[-1])
+            
+            # Add to previous query
             if len(q) > 0:
                 c = ' and '
             else:
                 c = ''
-            q += "{}'{}' in parents".format(c, parent)
+            q += "{}{}".format(c, p)
 
         # Query for files
         if len(q) > 0:
@@ -1053,7 +1063,7 @@ class VideoAnnotator:
                  output_resolution=None,
                  fps=None,
                  chunk_size=60,
-                 frame_limit=1000):
+                 frame_limit=100):
         # Name settings
         self.filename = input_filename
         self.video_format = input_filename.split('.')[-1]
@@ -1123,7 +1133,8 @@ class VideoAnnotator:
                         p = mp.Process(target=self._process_chunk, 
                                        args=(n, q), 
                                        name='{}-{} seconds'.format(n*self.chunk_size, (n+1)*self.chunk_size))
-                        print('starting process {}'.format(p.name))
+                        if verbose:
+                            print('starting process {}'.format(p.name))
                         p.start()
                         workers[i] = p
                         n += 1
@@ -1177,6 +1188,7 @@ class VideoAnnotator:
                              max_frames=self.frame_limit)
         
         # Create encoder for chunk
+        # (see https://stackoverflow.com/a/13298538/8066298)
         chunk_filename = 'video-{:04d}.{}'.format(n, self.video_format)
         cmd = ['ffmpeg',
                '-v', 'error',
@@ -1207,13 +1219,17 @@ class VideoAnnotator:
                         bbox_inches='tight', 
                         pad_inches=0, 
                         dpi=96)
-            #plt.close(fig)
-            del fig
+
+            # IMPORTANT: Manually garbage collect to release memory
+            fig.clf()      # clear figure
+            plt.close(fig) # close figure
+            gc.collect()   # force garbage collection
         
         # Check to make sure no frames are left in segment
         if reader.next_frame() is not None:
             raise UserWarning('Some frames may be skipped in chunk {}.'.format(n))
-        
+        reader.close()
+
         # Place video filename in queue
         q.put([n, chunk_filename])
         
@@ -1250,7 +1266,7 @@ class VideoAnnotator:
         ax.xaxis.set_major_locator(NullLocator())
         ax.yaxis.set_major_locator(NullLocator())
         
-        # Return annotate figure
+        # Return annotated figure
         return fig
 
 
@@ -1262,7 +1278,7 @@ class VideoReader:
                  input_filename,
                  t_start=0.0,
                  t_stop=None,
-                 max_frames=1000 # max number of frames to load at a time
+                 max_frames=100 # max number of frames to load at a time
                 ):
         # Settings
         self.input_filename = input_filename
@@ -1282,8 +1298,11 @@ class VideoReader:
         self.max_frames = max_frames
         self._sp = None
         
-        # Compute time chunk size to load
-        self._dt_chunk = self.max_frames / self._fps
+        # Compute time chunk size to load. Round down to nearest half second
+        # in order to avoid rounding errors while seeking. (Remember that 
+        # FFMPEG seeks by time, not frame number.)
+        eps = 0.5 # decimal to round down to
+        self._dt_chunk = int(self.max_frames/self._fps/eps)*eps
         self._t = self.t_start # pointer to current time
     
     def get_metadata(self, query):
@@ -1367,17 +1386,18 @@ class VideoReader:
             raise RuntimeError('Reached end of video segment.')
         
         # Close current pipe
-        del self._sp
+        self._close_sp()
                 
         # Begin piping output to stdout
         dt_chunk = min(self._dt_chunk, self.t_stop - self._t)
-        pad = 1.00 # pad to help accurate seeking
+        #pad = 1.00 # pad to help accurate seeking
         cmd = ['ffmpeg',
                '-v', 'error',
-               '-ss', '{:.2f}'.format(self._t - pad),
+               #'-ss', '{:.4f}'.format(self._t - pad),
+               '-ss', '{:.4f}'.format(self._t),
                '-i', self.input_filename,
-               '-ss', '{:.2f}'.format(pad - 0.01),
-               '-t', '{:.2f}'.format(dt_chunk - 0.01),
+               #'-ss', '{:.4f}'.format(pad - 0.01),
+               '-t', '{:.4f}'.format(dt_chunk),
                '-f', 'image2pipe',
                '-pix_fmt', '+rgb24', # throw error if rgb24 unavailable
                '-vcodec', 'rawvideo', # stream frame pixels only
@@ -1386,4 +1406,21 @@ class VideoReader:
         self._sp = self._run_pipe_command(cmd)
         
         # Increment time pointer
-        self._t += dt_chunk     
+        self._t += dt_chunk
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self):
+        self._close_sp()
+
+    def close(self):
+        self._close_sp()
+
+    def _close_sp(self):
+        if self._sp is not None:
+            try:
+                outs, errs = self._sp.communicate(timeout=10)
+            except TimeoutExpired:
+                self._sp.kill()
+                outs, errs = self._sp.communicate()
