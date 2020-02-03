@@ -49,7 +49,7 @@ DEFAULT_SORT_PARAMS = {
     'adjacency_radius': -1,
     'detect_sign': -1,
     'detect_threshold': 4,
-    'bursting_parents': True,
+    'bursting_parents': 'true', # must be string to avoid confusion with 1.0
     'clip_size': 100,
     'refrac_msec': 1.0,
     'firing_rate_thresh': 0.1,
@@ -86,8 +86,8 @@ def sort_spikes(*,
     print('done.')
 
     # Annoying bug: booleans must be lowercase strings
-    util.recursive_dict_search(params, True, 'true')
-    util.recursive_dict_search(params, False, 'false')
+    util.recursive_dict_search(params, 'True', 'true')
+    util.recursive_dict_search(params, 'False', 'false')
 
     # File settings
     output_dir = params['output_dir']
@@ -181,6 +181,10 @@ def sort_spikes(*,
                         'noise_overlap_thresh': params['noise_overlap_thresh'],
                         'peak_snr_thresh': params['peak_snr_thresh']},
                     params['opts'])
+
+    # Save sort parameters
+    with open(output_dir + 'sort_params.json', 'w') as f:
+        json.dump(params, f, indent=4)
 
 def track_pipeline_progress(mlclient):
     ### Track progress ###

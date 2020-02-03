@@ -740,6 +740,7 @@ def find_data(mouse_id, files, ext='.mat', exclude_strs=[]):
         for exclude_str in exclude_strs:
             if exclude_str in f.lower():
                 exclude = True
+                break
         if (f.lower().endswith(ext)
             and mouse_id in f.lower()
             and not exclude):
@@ -1050,8 +1051,11 @@ import tempfile
 import shutil
 import time
 import glob
-import imageio
 from matplotlib.ticker import NullLocator
+try:
+    import imageio
+except ModuleNotFoundError as e:
+    print(e, 'Some media functions may not be available.')
 
 class VideoAnnotator:
     
