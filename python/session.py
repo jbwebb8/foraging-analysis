@@ -41,10 +41,6 @@ class Session:
         self._check_attributes(var_names=required_vars)
 
         return self.vars['t_patch'].shape[0]
-    
-    @property
-    def day(self):
-        raise NotImplementedError
 
     @property
     def total_time(self):
@@ -368,14 +364,14 @@ class Session:
             else:
                 return r_total / t_total
 
-    def _get_max_harvest_rate(self, per_patch=True):
+    def _get_max_harvest_rate(self, per_patch=True, return_all=False):
         """
         Returns maximum attainable harvest rate given limitations of the
         animal for the given task.
         """
         raise NotImplementedError
 
-    def _get_optimal_harvest_rate(self, per_patch=True):
+    def _get_optimal_harvest_rate(self, per_patch=True, return_all=False):
         """
         Returns maximum theoretical harvest rate according to MVT.
         """
@@ -397,7 +393,10 @@ class TTSession(Session):
     BOARD_IDS = [16, 17, 22, 23, 24, 25, 26, 27] # GPIO IDs
     REWARD_VOLUME = 2.0 # uL
 
-    def __init__(self, data=None, params=None):
+    def __init__(self, *, 
+                 data=None, 
+                 params=None,
+                 sess_filepath=None):
         """Session for data acquired on TreadmillTracker system"""
 
         Session.__init__(self)
@@ -411,15 +410,18 @@ class TTSession(Session):
 
         # Create settings if files provided; otherwise, expect load()
         # to be called next.
-        self.settings = {}
-        if self.params is not None:
-            GPIO_labels = {}
-            for k, v in self.params['GPIO'].items():
-                if v in self.BOARD_IDS:
-                    GPIO_labels[k] = self.BOARD_IDS.index(v)
-                else:
-                    GPIO_labels[k] = None
-            self.settings['GPIO_labels'] = GPIO_labels
+        if sess_filepath is None:
+            self.settings = {}
+            if self.params is not None:
+                GPIO_labels = {}
+                for k, v in self.params['GPIO'].items():
+                    if v in self.BOARD_IDS:
+                        GPIO_labels[k] = self.BOARD_IDS.index(v)
+                    else:
+                        GPIO_labels[k] = None
+                self.settings['GPIO_labels'] = GPIO_labels
+        else:
+            self.load(sess_filepath)
 
     @property
     def day(self):
@@ -707,64 +709,77 @@ class LVSession(Session):
 
     WHEEL_CIRCUMFERENCE = 60 # cm
 
-    def __init__(self, filename, pupil_filepath=None):
+    def __init__(self, *,
+                 filename=None,
+                 sess_filepath=None,
+                 pupil_filepath=None):
         """Session for data acquired on LabVIEW system"""
 
         Session.__init__(self)
 
-        # Get filename
-        self.filename = filename
-        self.f = h5py.File(filename)
-        self.pupil_filepath = pupil_filepath
+        # Load from original data
+        if filename is not None:
+            # Get filename
+            self.filename = filename
+            self.f = h5py.File(filename)
+            self.pupil_filepath = pupil_filepath
 
-        # Set global attributes
-        match = re.search('_d[0-9]+[a-z]*_', filename, re.IGNORECASE)
-        day = match.group()[2:-1]
-        match = re.search('[a-z]+', day, re.IGNORECASE)
-        if match is not None:
-            day = day[:match.span()[0]]
-        self.day = int(day)
-        self.data_names += ['sound', 'cam', 'wheel_time',
-                            'wheel_speed', 'wheel_position', 'dt_patch']
-        self.var_names += ['s_var', 'fs_s', 't_s', 't_wheel', 'v_smooth', 
-                           'd_pupil', 't_pupil']
-        self.settings = {}
-        struct = self.f['Settings']['Property']
+            # Set global attributes
+            match = re.search('_d[0-9]+[a-z]*_', filename, re.IGNORECASE)
+            day = match.group()[2:-1]
+            match = re.search('[a-z]+', day, re.IGNORECASE)
+            if match is not None:
+                day = day[:match.span()[0]]
+            self.day = int(day)
+            self.data_names += ['sound', 'cam', 'wheel_time',
+                                'wheel_speed', 'wheel_position', 'dt_patch']
+            self.var_names += ['s_var', 'fs_s', 't_s', 't_wheel', 'v_smooth', 
+                            'd_pupil', 't_pupil']
+            self.settings = {}
+            struct = self.f['Settings']['Property']
 
-        # IDs
-        self.settings['global'] = {}
-        self.settings['global']['version'] = \
-            self._ASCII_to_string(struct['SoftwareVersion'])
-        self.settings['global']['chamber_id'] = \
-            self._ASCII_to_string(struct['ChamberID'])
+            # IDs
+            self.settings['global'] = {}
+            self.settings['global']['version'] = \
+                self._ASCII_to_string(struct['SoftwareVersion'])
+            self.settings['global']['chamber_id'] = \
+                self._ASCII_to_string(struct['ChamberID'])
 
-        # Tone cloud
-        s = 'SoundConfigurationToneCloudConfig'
-        self.settings['tone_cloud'] = {}
-        self.settings['tone_cloud']['low_freq'] = \
-            self._ASCII_to_float(struct[s + 'LowFreqHz'])
-        self.settings['tone_cloud']['hi_freq'] = \
-            self._ASCII_to_float(struct[s + 'HiFreqHz'])
-        self.settings['tone_cloud']['num_octave'] = \
-            self._ASCII_to_float(struct[s + 'FreqNumOctave'])
-        self.settings['tone_cloud']['bin_width'] = \
-            self._ASCII_to_float(struct[s + 'TimeBinWidthms'])
-        self.settings['tone_cloud']['num_chord'] = \
-            self._ASCII_to_float(struct[s + 'ToneNumChord'])
+            # Tone cloud
+            s = 'SoundConfigurationToneCloudConfig'
+            self.settings['tone_cloud'] = {}
+            self.settings['tone_cloud']['low_freq'] = \
+                self._ASCII_to_float(struct[s + 'LowFreqHz'])
+            self.settings['tone_cloud']['hi_freq'] = \
+                self._ASCII_to_float(struct[s + 'HiFreqHz'])
+            self.settings['tone_cloud']['num_octave'] = \
+                self._ASCII_to_float(struct[s + 'FreqNumOctave'])
+            self.settings['tone_cloud']['bin_width'] = \
+                self._ASCII_to_float(struct[s + 'TimeBinWidthms'])
+            self.settings['tone_cloud']['num_chord'] = \
+                self._ASCII_to_float(struct[s + 'ToneNumChord'])
 
-        # Target sound
-        s = 'SoundConfigurationTargetSoundConfig'
-        self.settings['target_sound'] = {}
-        self.settings['target_sound']['low_freq'] = \
-            self._ASCII_to_float(struct[s + 'TargetLowHz'])
-        self.settings['target_sound']['hi_freq'] = \
-            self._ASCII_to_float(struct[s + 'TargetHiHz'])
-        self.settings['target_sound']['duration'] = \
-            self._ASCII_to_float(struct[s + 'TargetDurationsec'])
-        self.settings['target_sound']['nc_avg'] = \
-            self._ASCII_to_float(struct[s + 'AvgStartsec'])
-        self.settings['target_sound']['type'] = \
-            self._ASCII_to_string(struct[s + 'TargetType'])
+            # Target sound
+            s = 'SoundConfigurationTargetSoundConfig'
+            self.settings['target_sound'] = {}
+            self.settings['target_sound']['low_freq'] = \
+                self._ASCII_to_float(struct[s + 'TargetLowHz'])
+            self.settings['target_sound']['hi_freq'] = \
+                self._ASCII_to_float(struct[s + 'TargetHiHz'])
+            self.settings['target_sound']['duration'] = \
+                self._ASCII_to_float(struct[s + 'TargetDurationsec'])
+            self.settings['target_sound']['nc_avg'] = \
+                self._ASCII_to_float(struct[s + 'AvgStartsec'])
+            self.settings['target_sound']['type'] = \
+                self._ASCII_to_string(struct[s + 'TargetType'])
+        
+        # Otherwise, assume loading from pickled session data
+        elif sess_filepath is not None:
+            self.load(sess_filepath)
+            self.f = None
+
+        else:
+            raise SyntaxError('filename or sess_filepath must be provided.')
 
     def _ASCII_to_float(self, s):
         return float([u''.join(chr(c) for c in s)][0])
@@ -776,6 +791,13 @@ class LVSession(Session):
         return bool([u''.join(chr(c) for c in s)][0])
     
     def _load_data(self, name):
+        # Check if raw data file available
+        if self.f is None:
+            msg = ('Original data required to load \'{}\'. Session '
+                    'must be loaded using filename of original data '
+                    'in constructor.').format(name)
+            raise UserWarning(msg)
+
         # Get chamber number (suffix for DAQ data)
         chamber_id = self.settings['global']['chamber_id']
         if 'ephys' in chamber_id.lower():
@@ -1136,47 +1158,51 @@ class LVSession(Session):
         return pupil
 
 
-class FreeSession(Session):
+class FreeSession(LVSession):
 
-    def __init__(self, filename):
+    def __init__(self, *,
+                 filename=None,
+                 sess_filepath=None,
+                 pupil_filepath=None):
         # Initialize Session
-        super().__init__(filename)
+        super().__init__(filename=filename,
+                         sess_filepath=sess_filepath,
+                         pupil_filepath=pupil_filepath)
 
         # Set class instance attributes
         self.data_names += ['reward']
-        struct = self.f['Settings']['Property']
-
-        # Run configuration
-        s = 'SoundConfigurationRunConfig'
-        self.settings['run_config'] = {}
-        self.settings['run_config']['session_duration'] = \
-            self._ASCII_to_float(struct[s + 'SessionTimemin'])
-        self.settings['run_config']['noise_level'] = \
-            self._ASCII_to_float(struct[s + 'NoiseLeveldBSPL'])
-        self.settings['run_config']['d_interpatch'] = \
-            self._ASCII_to_float(struct[s + 'InterPatchDistcm'])
-        self.settings['run_config']['d_patch'] = \
-            self._ASCII_to_float(struct[s + 'PatchLengthcm'])
-        self.settings['run_config']['task_type'] = \
-            self._ASCII_to_string(struct[s + 'TaskType'])
-        self.settings['run_config']['teleport'] = \
-            self._ASCII_to_bool(struct[s + 'InPatchTeleport'])
-        self.settings['run_config']['teleport_length'] = \
-            self._ASCII_to_float(struct[s + 'TeleToPatchEndcm'])
-        self.settings['run_config']['r_init'] = \
-            self._ASCII_to_float(struct[s + 'IniVoluL'])
-        self.settings['run_config']['rate_init'] = \
-            self._ASCII_to_float(struct[s + 'IniRateuLsec'])
-        self.settings['run_config']['tau'] = \
-            self._ASCII_to_float(struct[s + 'TCsec'])
-        #self.settings['run_config']['r_low'] = \
-        #    self._ASCII_to_float(struct[s + 'ThresholduL'])
-        self.settings['run_config']['end_target_trial'] = \
-            self._ASCII_to_bool(struct[s + 'Endtargettrial'])
-        self.settings['run_config']['v_leave'] = \
-            self._ASCII_to_float(struct[s + 'VThresholdms']) * 100 # cm/s
-        self.settings['run_config']['end_patch_speed'] = \
-            self._ASCII_to_bool(struct[s + 'Endpatchspeed'])
+        if filename is not None:
+            struct = self.f['Settings']['Property']
+            s = 'SoundConfigurationRunConfig'
+            self.settings['run_config'] = {}
+            self.settings['run_config']['session_duration'] = \
+                self._ASCII_to_float(struct[s + 'SessionTimemin'])
+            self.settings['run_config']['noise_level'] = \
+                self._ASCII_to_float(struct[s + 'NoiseLeveldBSPL'])
+            self.settings['run_config']['d_interpatch'] = \
+                self._ASCII_to_float(struct[s + 'InterPatchDistcm'])
+            self.settings['run_config']['d_patch'] = \
+                self._ASCII_to_float(struct[s + 'PatchLengthcm'])
+            self.settings['run_config']['task_type'] = \
+                self._ASCII_to_string(struct[s + 'TaskType'])
+            self.settings['run_config']['teleport'] = \
+                self._ASCII_to_bool(struct[s + 'InPatchTeleport'])
+            self.settings['run_config']['teleport_length'] = \
+                self._ASCII_to_float(struct[s + 'TeleToPatchEndcm'])
+            self.settings['run_config']['r_init'] = \
+                self._ASCII_to_float(struct[s + 'IniVoluL'])
+            self.settings['run_config']['rate_init'] = \
+                self._ASCII_to_float(struct[s + 'IniRateuLsec'])
+            self.settings['run_config']['tau'] = \
+                self._ASCII_to_float(struct[s + 'TCsec'])
+            #self.settings['run_config']['r_low'] = \
+            #    self._ASCII_to_float(struct[s + 'ThresholduL'])
+            self.settings['run_config']['end_target_trial'] = \
+                self._ASCII_to_bool(struct[s + 'Endtargettrial'])
+            self.settings['run_config']['v_leave'] = \
+                self._ASCII_to_float(struct[s + 'VThresholdms']) * 100 # cm/s
+            self.settings['run_config']['end_patch_speed'] = \
+                self._ASCII_to_bool(struct[s + 'Endpatchspeed'])
     
     def _load_subclass_data(self, name):
         if name == 'reward':
