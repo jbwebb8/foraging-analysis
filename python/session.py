@@ -937,16 +937,21 @@ class LVSession(Session):
                 
         return t_patch, in_patch, t_stop
 
-    def _get_patches_from_wheel(self, stop_thresh=0.5, return_idx=False):
+    def _get_patches_from_wheel(self, 
+                                stop_thresh=0.5,
+                                fs=200.0,
+                                clock_offset=None, 
+                                return_idx=False):
         # Requirements
         req_data = ['wheel_position', 'wheel_time']
-        req_vars = ['v_smooth']
+        req_vars = ['v_smooth', 't_patch']
         self._check_attributes(data_names=req_data, var_names=req_vars)
 
         # Load data
         v_smooth = self.vars['v_smooth']
         x_wheel = self.data['wheel_position']
         t_wheel = self.data['wheel_time']
+        t_patch_sound = self.vars['t_patch']
 
         # Session parameters
         v_run = self.settings['run_config']['v_leave']
@@ -954,6 +959,7 @@ class LVSession(Session):
 
         # Initialize values
         in_patch = True # task starts in a patch
+        n_exit = 0 # number of patch exits
         x_start = 0.0 # linear position of current patch start
         t_patch_wheel = [0.0] # patch entry/exit timestamps according to wheel data
         idx_patch_wheel = [0] # indices of above timestamps
@@ -966,9 +972,17 @@ class LVSession(Session):
             # 2) smoothed velocity exceeds threshold
             if in_patch and v_smooth[i] > v_run:
                 in_patch = False
-                x_start = x_wheel[i]
                 t_patch_wheel.append(t_wheel[i])
                 idx_patch_wheel.append(i)
+
+                # NOTE: The position at patch exit must be corrected for clock drift.
+                # See the wheel_alignment notebook for details.
+                n_exit += 1
+                if (n_exit == 1) and (clock_offset is None):
+                    clock_offset = t_patch_sound[0, 1] - t_wheel[i]
+                    idx_offset = int(clock_offset*fs)
+                x_start = x_wheel[max(i - idx_offset, 0)] # correct for clock drift
+
             # Enter patch criteria:
             # 1) not in a patch
             # 2) smoothed velocity falls below threshold
@@ -1029,6 +1043,10 @@ class LVSession(Session):
         t_patch_wheel, idx_patch_wheel, _, t_stop, idx_stop = \
             self._get_patches_from_wheel(return_idx=True)
         t_wheel = self.data['wheel_time']
+
+        # Ensure number of patches equal
+        assert (t_patch_sound.shape == t_patch_wheel.shape), \
+               'Sound and wheel data calculated different numbers of patches.'
 
         # Load last analyzable timestamp for interpolation function
         # (corresponds to last patch entry)
