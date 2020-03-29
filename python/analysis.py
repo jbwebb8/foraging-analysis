@@ -186,10 +186,27 @@ def get_exit_stats(sess, per_patch=True):
     else:
         return np.median(t_leave_lick), np.median(t_leave_reward)
 
-def get_interpatch_move_times(sess, v_run=None, v_stop=0.5):
+def get_interpatch_move_times(sess, 
+                              v_run=None, 
+                              v_stop=0.5,
+                              fs_wheel=200.0,
+                              exclude_window=[0.0, 0.0]):
     """
     Returns timestamps associated with the onset of running
     after stopping in between patches.
+
+    Args:
+    - sess (Session): A Session object.
+    - v_run (float): Velocity threshold for running. If None, the value in
+        the Session settings will be used.
+    - v_stop (float): Velocity threshold for stopping.
+    - fs_wheel (float): Encoder sampling rate.
+    - exclude_window (list): Time window around patch entry/exit in whicch
+        to exclude movement times. The format [t1, t2] excludes times in the
+        window [t + t1, t + t2] for patch entry/exit at time t.
+
+    Returns:
+    - t_move (ndarray): Times associated with onset of movement in interpatch.
     """
     # Settings
     if v_run is None:
@@ -197,16 +214,19 @@ def get_interpatch_move_times(sess, v_run=None, v_stop=0.5):
 
     # Load data
     sess.load_data(['wheel_position'])
-    sess.load_vars(['v_smooth', 't_wheel'])
+    sess.load_vars(['v_smooth', 't_wheel', 't_patch'])
     x_wheel = sess.data['wheel_position']
     v_smooth = sess.vars['v_smooth']
     t_wheel = sess.vars['t_wheel']
+    t_patch = sess.vars['t_patch']
 
     # Initialize values
     in_patch = True # task starts in a patch
     stopped_in_interpatch = False
     x_start = 0.0 # linear position of current patch start
     t_move = [] # timestamp associated with initiation of movement in interpatch
+    clock_offset = sess._estimate_clock_offset(stop_thresh=v_stop)
+    idx_offset = int(clock_offset*fs_wheel)
 
     # Iterate through wheel data
     for i in range(v_smooth.shape[0]):
@@ -215,7 +235,7 @@ def get_interpatch_move_times(sess, v_run=None, v_stop=0.5):
         # 2) smoothed velocity exceeds threshold
         if in_patch and v_smooth[i] > v_run:
             in_patch = False
-            x_start = x_wheel[i]
+            x_start = x_wheel[max(i - idx_offset, 0)] # correct for clock drift
 
         elif (stopped_in_interpatch
               and v_smooth[i] > v_run):
@@ -228,9 +248,18 @@ def get_interpatch_move_times(sess, v_run=None, v_stop=0.5):
         # 3) have covered minimum interpatch distance
         elif (not in_patch 
               and v_smooth[i] < v_stop):
-              if x_wheel[i] - x_start > sess.d_interpatch:
+              if x_wheel[max(i - idx_offset, 0)] - x_start > sess.d_interpatch:
                   in_patch = True
               else:
                   stopped_in_interpatch = True
 
-    return np.array(t_move)
+    # Exclude movement times too close to patch entry/exit
+    t_move = np.array(t_move)
+    t_event = t_patch.reshape([-1], order='C')
+    num_events = in_interval(t_move,
+                             t_event + exclude_window[0],
+                             t_event + exclude_window[1],
+                             query='event')
+    idx_keep = (num_events == 0)
+
+    return t_move[idx_keep]

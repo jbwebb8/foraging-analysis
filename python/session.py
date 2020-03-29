@@ -734,7 +734,7 @@ class LVSession(Session):
             self.data_names += ['sound', 'cam', 'wheel_time',
                                 'wheel_speed', 'wheel_position', 'dt_patch']
             self.var_names += ['s_var', 'fs_s', 't_s', 't_wheel', 'v_smooth', 
-                            'd_pupil', 't_pupil']
+                               'd_pupil', 't_pupil']
             self.settings = {}
             struct = self.f['Settings']['Property']
 
@@ -959,11 +959,16 @@ class LVSession(Session):
 
         # Initialize values
         in_patch = True # task starts in a patch
-        n_exit = 0 # number of patch exits
         x_start = 0.0 # linear position of current patch start
         t_patch_wheel = [0.0] # patch entry/exit timestamps according to wheel data
         idx_patch_wheel = [0] # indices of above timestamps
         idx_in_patch = np.zeros(v_smooth.shape[0], dtype=np.bool)
+
+        # NOTE: The position at patch exit must be corrected for clock drift.
+        # See the wheel_alignment notebook for details.
+        if clock_offset is None:
+            clock_offset = self._estimate_clock_offset(stop_thresh=stop_thresh)
+        idx_offset = int(clock_offset*fs)
 
         # Iterate through wheel data
         for i in range(v_smooth.shape[0]):
@@ -974,13 +979,6 @@ class LVSession(Session):
                 in_patch = False
                 t_patch_wheel.append(t_wheel[i])
                 idx_patch_wheel.append(i)
-
-                # NOTE: The position at patch exit must be corrected for clock drift.
-                # See the wheel_alignment notebook for details.
-                n_exit += 1
-                if (n_exit == 1) and (clock_offset is None):
-                    clock_offset = t_patch_sound[0, 1] - t_wheel[i]
-                    idx_offset = int(clock_offset*fs)
                 x_start = x_wheel[max(i - idx_offset, 0)] # correct for clock drift
 
             # Enter patch criteria:
@@ -989,7 +987,7 @@ class LVSession(Session):
             # 3) have covered minimum interpatch distance
             elif (not in_patch
                 and v_smooth[i] < v_stop
-                and x_wheel[i] - x_start > self.d_interpatch):
+                and x_wheel[max(i - idx_offset, 0)] - x_start > self.d_interpatch):
                 in_patch = True
                 t_patch_wheel.append(t_wheel[i])
                 idx_patch_wheel.append(i)
@@ -1022,6 +1020,46 @@ class LVSession(Session):
                 t_stop, idx_stop
         else:
             return t_patch_wheel, idx_in_patch, t_stop
+
+    def _estimate_clock_offset(self, stop_thresh=0.5):
+        # Requirements
+        req_data = ['wheel_position', 'wheel_time']
+        req_vars = ['v_smooth', 't_patch']
+        self._check_attributes(data_names=req_data, var_names=req_vars)
+
+        # Load data
+        v_smooth = self.vars['v_smooth']
+        x_wheel = self.data['wheel_position']
+        t_wheel = self.data['wheel_time']
+        t_patch_sound = self.vars['t_patch']
+
+        # Session parameters
+        v_run = self.settings['run_config']['v_leave']
+        v_stop = stop_thresh # threshold for stopping (cm/s)
+
+        # Initialize values
+        in_patch = True # task starts in a patch
+        x_start = 0.0 # linear position of current patch start
+
+        # Iterate through wheel data and return difference at first patch exit.
+        for i in range(v_smooth.shape[0]):
+            # Leave patch criteria:
+            # 1) in a patch
+            # 2) smoothed velocity exceeds threshold
+            if in_patch and v_smooth[i] > v_run:
+                in_patch = False
+                return t_patch_sound[0, 1] - t_wheel[i]
+
+            # Enter patch criteria:
+            # 1) not in a patch
+            # 2) smoothed velocity falls below threshold
+            # 3) have covered minimum interpatch distance
+            elif (not in_patch
+                and v_smooth[i] < v_stop
+                and x_wheel[i] - x_start > self.d_interpatch):
+                in_patch = True
+            
+
 
     def get_wheel_times(self):
         # Requirements
