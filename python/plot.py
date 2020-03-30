@@ -410,8 +410,10 @@ class Plotter:
             # Plot average firing rate across session
             if metrics is not None:
                 rate = metrics['clusters'][l]['metrics']['firing_rate']
-                self.ax.plot(np.array([t[0], t[-1]]), np.array([rate]*2),
-                        linestyle='--', color='C0')
+                self.ax.plot(np.array([t[0], t[-1]]), 
+                             np.array([rate]*2),
+                             linestyle='--', 
+                             **{k:v for k, v in kwargs.items() if k != 'label'})
 
             # Axis settings
             self.ax.set_title('unit %d' % label)
