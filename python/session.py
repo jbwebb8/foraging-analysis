@@ -11,6 +11,7 @@ from scipy.interpolate import interp1d
 from helper import smooth_waveform_variance, find_threshold, \
                    cumulative_reward, get_optimal_values, compare_patch_times
 from util import in_interval, _check_list, dec_to_bin_array, flatten_list
+from ephys import LinearRegression
 
 class Session:
 
@@ -772,6 +773,9 @@ class LVSession(Session):
                 self._ASCII_to_float(struct[s + 'AvgStartsec'])
             self.settings['target_sound']['type'] = \
                 self._ASCII_to_string(struct[s + 'TargetType'])
+
+            # Placeholder for clock drift model
+            self.drift_model = None
         
         # Otherwise, assume loading from pickled session data
         elif sess_filepath is not None:
@@ -940,8 +944,10 @@ class LVSession(Session):
     def _get_patches_from_wheel(self, 
                                 stop_thresh=0.5,
                                 fs=200.0,
-                                clock_offset=None, 
-                                return_idx=False):
+                                return_idx=False,
+                                search_rate=1.25,
+                                max_attempts=10,
+                                atol=1.0):
         # Requirements
         req_data = ['wheel_position', 'wheel_time']
         req_vars = ['v_smooth', 't_patch']
@@ -957,63 +963,88 @@ class LVSession(Session):
         v_run = self.settings['run_config']['v_leave']
         v_stop = stop_thresh # threshold for stopping (cm/s)
 
-        # Initialize values
-        in_patch = True # task starts in a patch
-        x_start = 0.0 # linear position of current patch start
-        t_patch_wheel = [0.0] # patch entry/exit timestamps according to wheel data
-        idx_patch_wheel = [0] # indices of above timestamps
-        idx_in_patch = np.zeros(v_smooth.shape[0], dtype=np.bool)
-
         # NOTE: The position at patch exit must be corrected for clock drift.
         # See the wheel_alignment notebook for details.
-        if clock_offset is None:
-            clock_offset = self._estimate_clock_offset(stop_thresh=stop_thresh)
-        idx_offset = int(clock_offset*fs)
+        if self.drift_model is None:
+            drift_model = self._estimate_clock_drift(stop_thresh=stop_thresh)
+        else:
+            drift_model = self.drift_model
 
-        # Iterate through wheel data
-        for i in range(v_smooth.shape[0]):
-            # Leave patch criteria:
-            # 1) in a patch
-            # 2) smoothed velocity exceeds threshold
-            if in_patch and v_smooth[i] > v_run:
-                in_patch = False
-                t_patch_wheel.append(t_wheel[i])
-                idx_patch_wheel.append(i)
-                x_start = x_wheel[max(i - idx_offset, 0)] # correct for clock drift
+        for n in range(max_attempts):
+            # Initialize values
+            in_patch = True # task starts in a patch
+            x_start = 0.0 # linear position of current patch start
+            t_patch_wheel = [0.0] # patch entry/exit timestamps according to wheel data
+            idx_patch_wheel = [0] # indices of above timestamps
+            idx_in_patch = np.zeros(v_smooth.shape[0], dtype=np.bool)
 
-            # Enter patch criteria:
-            # 1) not in a patch
-            # 2) smoothed velocity falls below threshold
-            # 3) have covered minimum interpatch distance
-            elif (not in_patch
-                and v_smooth[i] < v_stop
-                and x_wheel[max(i - idx_offset, 0)] - x_start > self.d_interpatch):
-                in_patch = True
-                t_patch_wheel.append(t_wheel[i])
-                idx_patch_wheel.append(i)
-            
-            # Update in_patch indices
-            idx_in_patch[i] = in_patch
+            # Iterate through wheel data
+            for i in range(v_smooth.shape[0]):
+                # Correct wheel position for clock drift
+                t_offset = drift_model.predict(np.array([t_wheel[i]]))
+                x_i = x_wheel[max(i - int(t_offset*fs), 0)]
 
-        # Drop last patch-interpatch sequence
-        t_patch_wheel = np.array(t_patch_wheel)
-        idx_patch_wheel = np.array(idx_patch_wheel)
-        if t_patch_wheel.shape[0] % 2 == 1: 
-            # End in patch: drop last patch entry
-            t_stop = t_patch_wheel[-1]
-            idx_stop = idx_patch_wheel[-1]
-            t_patch_wheel = t_patch_wheel[:-1]
-            idx_patch_wheel = idx_patch_wheel[:-1]
-        else: 
-            # End in interpatch: drop last patch entry and exit
-            t_stop = t_patch_wheel[-2]
-            idx_stop = idx_patch_wheel[-2]
-            t_patch_wheel = t_patch_wheel[:-2]
-            idx_patch_wheel = idx_patch_wheel[:-2]
+                # Leave patch criteria:
+                # 1) in a patch
+                # 2) smoothed velocity exceeds threshold
+                if in_patch and v_smooth[i] > v_run:
+                    in_patch = False
+                    t_patch_wheel.append(t_wheel[i])
+                    idx_patch_wheel.append(i)
+                    x_start = x_i
 
-        # Reshape
-        t_patch_wheel = t_patch_wheel.reshape([-1, 2])
-        idx_patch_wheel = idx_patch_wheel.reshape([-1, 2])
+                # Enter patch criteria:
+                # 1) not in a patch
+                # 2) smoothed velocity falls below threshold
+                # 3) have covered minimum interpatch distance
+                elif (not in_patch
+                    and v_smooth[i] < v_stop
+                    and x_i - x_start > self.d_interpatch):
+                    in_patch = True
+                    t_patch_wheel.append(t_wheel[i])
+                    idx_patch_wheel.append(i)
+                
+                # Update in_patch indices
+                idx_in_patch[i] = in_patch
+
+            # Drop last patch-interpatch sequence
+            t_patch_wheel = np.array(t_patch_wheel)
+            idx_patch_wheel = np.array(idx_patch_wheel)
+            if t_patch_wheel.shape[0] % 2 == 1: 
+                # End in patch: drop last patch entry
+                t_stop = t_patch_wheel[-1]
+                idx_stop = idx_patch_wheel[-1]
+                t_patch_wheel = t_patch_wheel[:-1]
+                idx_patch_wheel = idx_patch_wheel[:-1]
+            else: 
+                # End in interpatch: drop last patch entry and exit
+                t_stop = t_patch_wheel[-2]
+                idx_stop = idx_patch_wheel[-2]
+                t_patch_wheel = t_patch_wheel[:-2]
+                idx_patch_wheel = idx_patch_wheel[:-2]
+
+            # Reshape
+            t_patch_wheel = t_patch_wheel.reshape([-1, 2])
+            idx_patch_wheel = idx_patch_wheel.reshape([-1, 2])
+
+            # Compare to sound patch times
+            if ((t_patch_sound.shape == t_patch_wheel.shape) and
+                (np.abs(t_patch_sound - t_patch_wheel) <= atol).all()):
+                break
+            else:
+                w_old_str = ' '.join(['{:.3e}'.format(w[0]) for w in drift_model._w])
+                drift_model._w[0] *= search_rate
+                w_new_str = ' '.join(['{:.3e}'.format(w[0]) for w in drift_model._w])
+                print('Model params [{}] failed. Attempting with params [{}] ...'
+                      .format(w_old_str, w_new_str))
+
+        # Set drift model if successful
+        if n == max_attempts - 1:
+            raise RuntimeError('Could not find accurate clock drift model.')
+        else:
+            self.drift_model = drift_model
+            print('Found clock drift model with params [{}].'
+                  .format(' '.join(['{:.3e}'.format(w[0]) for w in drift_model._w])))
 
         if return_idx:
             return t_patch_wheel, idx_patch_wheel, idx_in_patch, \
@@ -1021,7 +1052,11 @@ class LVSession(Session):
         else:
             return t_patch_wheel, idx_in_patch, t_stop
 
-    def _estimate_clock_offset(self, stop_thresh=0.5):
+    def _estimate_clock_drift(self, 
+                              stop_thresh=0.5, 
+                              fs=200.0,
+                              tol=1.0,
+                              event='exit'):
         # Requirements
         req_data = ['wheel_position', 'wheel_time']
         req_vars = ['v_smooth', 't_patch']
@@ -1039,16 +1074,26 @@ class LVSession(Session):
 
         # Initialize values
         in_patch = True # task starts in a patch
+        n_patch = 0
         x_start = 0.0 # linear position of current patch start
+        t_patch_wheel = [0.0] # patch entry/exit timestamps according to wheel data
+        offset = 0.0
 
-        # Iterate through wheel data and return difference at first patch exit.
+        # Iterate through wheel data, stopping after wheel and sound data conflict.
         for i in range(v_smooth.shape[0]):
+            # Get corrected wheel position
+            x_i = x_wheel[i - int(offset*fs)]
+
             # Leave patch criteria:
             # 1) in a patch
             # 2) smoothed velocity exceeds threshold
             if in_patch and v_smooth[i] > v_run:
                 in_patch = False
-                return t_patch_sound[0, 1] - t_wheel[i]
+                n_patch += 1
+                if n_patch == 1:
+                    offset = t_patch_sound[0, 1] - t_wheel[i]
+                t_patch_wheel.append(t_wheel[i])
+                x_start = x_i
 
             # Enter patch criteria:
             # 1) not in a patch
@@ -1056,10 +1101,29 @@ class LVSession(Session):
             # 3) have covered minimum interpatch distance
             elif (not in_patch
                 and v_smooth[i] < v_stop
-                and x_wheel[i] - x_start > self.d_interpatch):
+                and x_i - x_start > self.d_interpatch):
                 in_patch = True
-            
+                if abs(t_patch_sound[n_patch, 0] - t_wheel[i]) <= tol:
+                    t_patch_wheel.append(t_wheel[i])
+                else:
+                    break
 
+        # Calculate difference between patch times
+        t_patch_wheel = np.array(t_patch_wheel).reshape([-1, 2])
+        diff = (t_patch_sound[:n_patch] - t_patch_wheel)[1:, :] # ignore first patch
+            
+        # Fit linear regresion model to patch entry/exit difference 
+        # to estimate clock drift.
+        model = LinearRegression()
+        if event.lower() == 'entry':
+            j = 0
+        elif event.lower() == 'exit':
+            j = 1
+        else:
+            raise SyntaxError('Unknown event \'{}\'.'.format(event))
+        model.fit(t_patch_sound[1:n_patch, j], diff[:, j])
+
+        return model
 
     def get_wheel_times(self):
         # Requirements

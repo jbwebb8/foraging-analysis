@@ -225,17 +225,19 @@ def get_interpatch_move_times(sess,
     stopped_in_interpatch = False
     x_start = 0.0 # linear position of current patch start
     t_move = [] # timestamp associated with initiation of movement in interpatch
-    clock_offset = sess._estimate_clock_offset(stop_thresh=v_stop)
-    idx_offset = int(clock_offset*fs_wheel)
 
     # Iterate through wheel data
     for i in range(v_smooth.shape[0]):
+        # Correct wheel position for clock drift
+        t_offset = sess.drift_model.predict(np.array([t_wheel[i]]))
+        x_i = x_wheel[max(i - int(t_offset*fs_wheel), 0)]
+
         # Leave patch criteria:
         # 1) in a patch
         # 2) smoothed velocity exceeds threshold
         if in_patch and v_smooth[i] > v_run:
             in_patch = False
-            x_start = x_wheel[max(i - idx_offset, 0)] # correct for clock drift
+            x_start = x_i
 
         elif (stopped_in_interpatch
               and v_smooth[i] > v_run):
@@ -248,7 +250,7 @@ def get_interpatch_move_times(sess,
         # 3) have covered minimum interpatch distance
         elif (not in_patch 
               and v_smooth[i] < v_stop):
-              if x_wheel[max(i - idx_offset, 0)] - x_start > sess.d_interpatch:
+              if x_i - x_start > sess.d_interpatch:
                   in_patch = True
               else:
                   stopped_in_interpatch = True
