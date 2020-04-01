@@ -5,15 +5,20 @@ from scipy.optimize.nonlin import NoConvergence
 import warnings
 
 ### Waveform analysis ###
-def med_filt(x, n=3):
+def med_filt(x, n=3, ignore_nan=True):
+    if ignore_nan:
+        med_func = np.nanmedian
+    else:
+        med_func = np.median
+
     X = np.zeros([n, len(x)])
     for i in range(n):
         X[i] = np.roll(x, -n//2 + i)
     
-    x_filt = np.median(X, axis=0)
+    x_filt = med_func(X, axis=0)
     for i in range(n//2):
-        x_filt[i] = np.median(X[(n//2 - i):, i])
-        x_filt[-(i+1)] = np.median(X[:(n//2 + i), -(i+1)])
+        x_filt[i] = med_func(X[(n//2 - i):, i])
+        x_filt[-(i+1)] = med_func(X[:(n//2 + i), -(i+1)])
    
     return x_filt
 

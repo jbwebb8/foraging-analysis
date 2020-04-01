@@ -11,6 +11,7 @@ from scipy.interpolate import interp1d
 from helper import smooth_waveform_variance, find_threshold, \
                    cumulative_reward, get_optimal_values, compare_patch_times
 from util import in_interval, _check_list, dec_to_bin_array, flatten_list
+from ephys import LinearRegression
 
 class Session:
 
@@ -41,10 +42,6 @@ class Session:
         self._check_attributes(var_names=required_vars)
 
         return self.vars['t_patch'].shape[0]
-    
-    @property
-    def day(self):
-        raise NotImplementedError
 
     @property
     def total_time(self):
@@ -368,14 +365,14 @@ class Session:
             else:
                 return r_total / t_total
 
-    def _get_max_harvest_rate(self, per_patch=True):
+    def _get_max_harvest_rate(self, per_patch=True, return_all=False):
         """
         Returns maximum attainable harvest rate given limitations of the
         animal for the given task.
         """
         raise NotImplementedError
 
-    def _get_optimal_harvest_rate(self, per_patch=True):
+    def _get_optimal_harvest_rate(self, per_patch=True, return_all=False):
         """
         Returns maximum theoretical harvest rate according to MVT.
         """
@@ -397,7 +394,10 @@ class TTSession(Session):
     BOARD_IDS = [16, 17, 22, 23, 24, 25, 26, 27] # GPIO IDs
     REWARD_VOLUME = 2.0 # uL
 
-    def __init__(self, data=None, params=None):
+    def __init__(self, *, 
+                 data=None, 
+                 params=None,
+                 sess_filepath=None):
         """Session for data acquired on TreadmillTracker system"""
 
         Session.__init__(self)
@@ -411,15 +411,18 @@ class TTSession(Session):
 
         # Create settings if files provided; otherwise, expect load()
         # to be called next.
-        self.settings = {}
-        if self.params is not None:
-            GPIO_labels = {}
-            for k, v in self.params['GPIO'].items():
-                if v in self.BOARD_IDS:
-                    GPIO_labels[k] = self.BOARD_IDS.index(v)
-                else:
-                    GPIO_labels[k] = None
-            self.settings['GPIO_labels'] = GPIO_labels
+        if sess_filepath is None:
+            self.settings = {}
+            if self.params is not None:
+                GPIO_labels = {}
+                for k, v in self.params['GPIO'].items():
+                    if v in self.BOARD_IDS:
+                        GPIO_labels[k] = self.BOARD_IDS.index(v)
+                    else:
+                        GPIO_labels[k] = None
+                self.settings['GPIO_labels'] = GPIO_labels
+        else:
+            self.load(sess_filepath)
 
     @property
     def day(self):
@@ -707,64 +710,80 @@ class LVSession(Session):
 
     WHEEL_CIRCUMFERENCE = 60 # cm
 
-    def __init__(self, filename, pupil_filepath=None):
+    def __init__(self, *,
+                 filename=None,
+                 sess_filepath=None,
+                 pupil_filepath=None):
         """Session for data acquired on LabVIEW system"""
 
         Session.__init__(self)
 
-        # Get filename
-        self.filename = filename
-        self.f = h5py.File(filename)
-        self.pupil_filepath = pupil_filepath
+        # Load from original data
+        if filename is not None:
+            # Get filename
+            self.filename = filename
+            self.f = h5py.File(filename)
+            self.pupil_filepath = pupil_filepath
 
-        # Set global attributes
-        match = re.search('_d[0-9]+[a-z]*_', filename, re.IGNORECASE)
-        day = match.group()[2:-1]
-        match = re.search('[a-z]+', day, re.IGNORECASE)
-        if match is not None:
-            day = day[:match.span()[0]]
-        self.day = int(day)
-        self.data_names += ['sound', 'cam', 'wheel_time',
-                            'wheel_speed', 'wheel_position', 'dt_patch']
-        self.var_names += ['s_var', 'fs_s', 't_s', 't_wheel', 'v_smooth', 
-                           'd_pupil', 't_pupil']
-        self.settings = {}
-        struct = self.f['Settings']['Property']
+            # Set global attributes
+            match = re.search('_d[0-9]+[a-z]*_', filename, re.IGNORECASE)
+            day = match.group()[2:-1]
+            match = re.search('[a-z]+', day, re.IGNORECASE)
+            if match is not None:
+                day = day[:match.span()[0]]
+            self.day = int(day)
+            self.data_names += ['sound', 'cam', 'wheel_time',
+                                'wheel_speed', 'wheel_position', 'dt_patch']
+            self.var_names += ['s_var', 'fs_s', 't_s', 't_wheel', 'v_smooth', 
+                               'd_pupil', 't_pupil']
+            self.settings = {}
+            struct = self.f['Settings']['Property']
 
-        # IDs
-        self.settings['global'] = {}
-        self.settings['global']['version'] = \
-            self._ASCII_to_string(struct['SoftwareVersion'])
-        self.settings['global']['chamber_id'] = \
-            self._ASCII_to_string(struct['ChamberID'])
+            # IDs
+            self.settings['global'] = {}
+            self.settings['global']['version'] = \
+                self._ASCII_to_string(struct['SoftwareVersion'])
+            self.settings['global']['chamber_id'] = \
+                self._ASCII_to_string(struct['ChamberID'])
 
-        # Tone cloud
-        s = 'SoundConfigurationToneCloudConfig'
-        self.settings['tone_cloud'] = {}
-        self.settings['tone_cloud']['low_freq'] = \
-            self._ASCII_to_float(struct[s + 'LowFreqHz'])
-        self.settings['tone_cloud']['hi_freq'] = \
-            self._ASCII_to_float(struct[s + 'HiFreqHz'])
-        self.settings['tone_cloud']['num_octave'] = \
-            self._ASCII_to_float(struct[s + 'FreqNumOctave'])
-        self.settings['tone_cloud']['bin_width'] = \
-            self._ASCII_to_float(struct[s + 'TimeBinWidthms'])
-        self.settings['tone_cloud']['num_chord'] = \
-            self._ASCII_to_float(struct[s + 'ToneNumChord'])
+            # Tone cloud
+            s = 'SoundConfigurationToneCloudConfig'
+            self.settings['tone_cloud'] = {}
+            self.settings['tone_cloud']['low_freq'] = \
+                self._ASCII_to_float(struct[s + 'LowFreqHz'])
+            self.settings['tone_cloud']['hi_freq'] = \
+                self._ASCII_to_float(struct[s + 'HiFreqHz'])
+            self.settings['tone_cloud']['num_octave'] = \
+                self._ASCII_to_float(struct[s + 'FreqNumOctave'])
+            self.settings['tone_cloud']['bin_width'] = \
+                self._ASCII_to_float(struct[s + 'TimeBinWidthms'])
+            self.settings['tone_cloud']['num_chord'] = \
+                self._ASCII_to_float(struct[s + 'ToneNumChord'])
 
-        # Target sound
-        s = 'SoundConfigurationTargetSoundConfig'
-        self.settings['target_sound'] = {}
-        self.settings['target_sound']['low_freq'] = \
-            self._ASCII_to_float(struct[s + 'TargetLowHz'])
-        self.settings['target_sound']['hi_freq'] = \
-            self._ASCII_to_float(struct[s + 'TargetHiHz'])
-        self.settings['target_sound']['duration'] = \
-            self._ASCII_to_float(struct[s + 'TargetDurationsec'])
-        self.settings['target_sound']['nc_avg'] = \
-            self._ASCII_to_float(struct[s + 'AvgStartsec'])
-        self.settings['target_sound']['type'] = \
-            self._ASCII_to_string(struct[s + 'TargetType'])
+            # Target sound
+            s = 'SoundConfigurationTargetSoundConfig'
+            self.settings['target_sound'] = {}
+            self.settings['target_sound']['low_freq'] = \
+                self._ASCII_to_float(struct[s + 'TargetLowHz'])
+            self.settings['target_sound']['hi_freq'] = \
+                self._ASCII_to_float(struct[s + 'TargetHiHz'])
+            self.settings['target_sound']['duration'] = \
+                self._ASCII_to_float(struct[s + 'TargetDurationsec'])
+            self.settings['target_sound']['nc_avg'] = \
+                self._ASCII_to_float(struct[s + 'AvgStartsec'])
+            self.settings['target_sound']['type'] = \
+                self._ASCII_to_string(struct[s + 'TargetType'])
+
+            # Placeholder for clock drift model
+            self.drift_model = None
+        
+        # Otherwise, assume loading from pickled session data
+        elif sess_filepath is not None:
+            self.load(sess_filepath)
+            self.f = None
+
+        else:
+            raise SyntaxError('filename or sess_filepath must be provided.')
 
     def _ASCII_to_float(self, s):
         return float([u''.join(chr(c) for c in s)][0])
@@ -776,6 +795,13 @@ class LVSession(Session):
         return bool([u''.join(chr(c) for c in s)][0])
     
     def _load_data(self, name):
+        # Check if raw data file available
+        if self.f is None:
+            msg = ('Original data required to load \'{}\'. Session '
+                    'must be loaded using filename of original data '
+                    'in constructor.').format(name)
+            raise UserWarning(msg)
+
         # Get chamber number (suffix for DAQ data)
         chamber_id = self.settings['global']['chamber_id']
         if 'ephys' in chamber_id.lower():
@@ -915,16 +941,132 @@ class LVSession(Session):
                 
         return t_patch, in_patch, t_stop
 
-    def _get_patches_from_wheel(self, stop_thresh=0.5, return_idx=False):
+    def _get_patches_from_wheel(self, 
+                                stop_thresh=0.5,
+                                fs=200.0,
+                                return_idx=False,
+                                search_rate=1.25,
+                                max_attempts=10,
+                                atol=1.0):
         # Requirements
         req_data = ['wheel_position', 'wheel_time']
-        req_vars = ['v_smooth']
+        req_vars = ['v_smooth', 't_patch']
         self._check_attributes(data_names=req_data, var_names=req_vars)
 
         # Load data
         v_smooth = self.vars['v_smooth']
         x_wheel = self.data['wheel_position']
         t_wheel = self.data['wheel_time']
+        t_patch_sound = self.vars['t_patch']
+
+        # Session parameters
+        v_run = self.settings['run_config']['v_leave']
+        v_stop = stop_thresh # threshold for stopping (cm/s)
+
+        # NOTE: The position at patch exit must be corrected for clock drift.
+        # See the wheel_alignment notebook for details.
+        if self.drift_model is None:
+            drift_model = self._estimate_clock_drift(stop_thresh=stop_thresh)
+        else:
+            drift_model = self.drift_model
+
+        for n in range(max_attempts):
+            # Initialize values
+            in_patch = True # task starts in a patch
+            x_start = 0.0 # linear position of current patch start
+            t_patch_wheel = [0.0] # patch entry/exit timestamps according to wheel data
+            idx_patch_wheel = [0] # indices of above timestamps
+            idx_in_patch = np.zeros(v_smooth.shape[0], dtype=np.bool)
+
+            # Iterate through wheel data
+            for i in range(v_smooth.shape[0]):
+                # Correct wheel position for clock drift
+                t_offset = drift_model.predict(np.array([t_wheel[i]]))
+                x_i = x_wheel[max(i - int(t_offset*fs), 0)]
+
+                # Leave patch criteria:
+                # 1) in a patch
+                # 2) smoothed velocity exceeds threshold
+                if in_patch and v_smooth[i] > v_run:
+                    in_patch = False
+                    t_patch_wheel.append(t_wheel[i])
+                    idx_patch_wheel.append(i)
+                    x_start = x_i
+
+                # Enter patch criteria:
+                # 1) not in a patch
+                # 2) smoothed velocity falls below threshold
+                # 3) have covered minimum interpatch distance
+                elif (not in_patch
+                    and v_smooth[i] < v_stop
+                    and x_i - x_start > self.d_interpatch):
+                    in_patch = True
+                    t_patch_wheel.append(t_wheel[i])
+                    idx_patch_wheel.append(i)
+                
+                # Update in_patch indices
+                idx_in_patch[i] = in_patch
+
+            # Drop last patch-interpatch sequence
+            t_patch_wheel = np.array(t_patch_wheel)
+            idx_patch_wheel = np.array(idx_patch_wheel)
+            if t_patch_wheel.shape[0] % 2 == 1: 
+                # End in patch: drop last patch entry
+                t_stop = t_patch_wheel[-1]
+                idx_stop = idx_patch_wheel[-1]
+                t_patch_wheel = t_patch_wheel[:-1]
+                idx_patch_wheel = idx_patch_wheel[:-1]
+            else: 
+                # End in interpatch: drop last patch entry and exit
+                t_stop = t_patch_wheel[-2]
+                idx_stop = idx_patch_wheel[-2]
+                t_patch_wheel = t_patch_wheel[:-2]
+                idx_patch_wheel = idx_patch_wheel[:-2]
+
+            # Reshape
+            t_patch_wheel = t_patch_wheel.reshape([-1, 2])
+            idx_patch_wheel = idx_patch_wheel.reshape([-1, 2])
+
+            # Compare to sound patch times
+            if ((t_patch_sound.shape == t_patch_wheel.shape) and
+                (np.abs(t_patch_sound - t_patch_wheel) <= atol).all()):
+                break
+            else:
+                w_old_str = ' '.join(['{:.3e}'.format(w[0]) for w in drift_model._w])
+                drift_model._w[0] *= search_rate
+                w_new_str = ' '.join(['{:.3e}'.format(w[0]) for w in drift_model._w])
+                print('Model params [{}] failed. Attempting with params [{}] ...'
+                      .format(w_old_str, w_new_str))
+
+        # Set drift model if successful
+        if n == max_attempts - 1:
+            raise RuntimeError('Could not find accurate clock drift model.')
+        else:
+            self.drift_model = drift_model
+            print('Found clock drift model with params [{}].'
+                  .format(' '.join(['{:.3e}'.format(w[0]) for w in drift_model._w])))
+
+        if return_idx:
+            return t_patch_wheel, idx_patch_wheel, idx_in_patch, \
+                t_stop, idx_stop
+        else:
+            return t_patch_wheel, idx_in_patch, t_stop
+
+    def _estimate_clock_drift(self, 
+                              stop_thresh=0.5, 
+                              fs=200.0,
+                              tol=1.0,
+                              event='exit'):
+        # Requirements
+        req_data = ['wheel_position', 'wheel_time']
+        req_vars = ['v_smooth', 't_patch']
+        self._check_attributes(data_names=req_data, var_names=req_vars)
+
+        # Load data
+        v_smooth = self.vars['v_smooth']
+        x_wheel = self.data['wheel_position']
+        t_wheel = self.data['wheel_time']
+        t_patch_sound = self.vars['t_patch']
 
         # Session parameters
         v_run = self.settings['run_config']['v_leave']
@@ -932,60 +1074,56 @@ class LVSession(Session):
 
         # Initialize values
         in_patch = True # task starts in a patch
+        n_patch = 0
         x_start = 0.0 # linear position of current patch start
         t_patch_wheel = [0.0] # patch entry/exit timestamps according to wheel data
-        idx_patch_wheel = [0] # indices of above timestamps
-        idx_in_patch = np.zeros(v_smooth.shape[0], dtype=np.bool)
+        offset = 0.0
 
-        # Iterate through wheel data
+        # Iterate through wheel data, stopping after wheel and sound data conflict.
         for i in range(v_smooth.shape[0]):
+            # Get corrected wheel position
+            x_i = x_wheel[i - int(offset*fs)]
+
             # Leave patch criteria:
             # 1) in a patch
             # 2) smoothed velocity exceeds threshold
             if in_patch and v_smooth[i] > v_run:
                 in_patch = False
-                x_start = x_wheel[i]
+                n_patch += 1
+                if n_patch == 1:
+                    offset = t_patch_sound[0, 1] - t_wheel[i]
                 t_patch_wheel.append(t_wheel[i])
-                idx_patch_wheel.append(i)
+                x_start = x_i
+
             # Enter patch criteria:
             # 1) not in a patch
             # 2) smoothed velocity falls below threshold
             # 3) have covered minimum interpatch distance
             elif (not in_patch
                 and v_smooth[i] < v_stop
-                and x_wheel[i] - x_start > self.d_interpatch):
+                and x_i - x_start > self.d_interpatch):
                 in_patch = True
-                t_patch_wheel.append(t_wheel[i])
-                idx_patch_wheel.append(i)
+                if abs(t_patch_sound[n_patch, 0] - t_wheel[i]) <= tol:
+                    t_patch_wheel.append(t_wheel[i])
+                else:
+                    break
+
+        # Calculate difference between patch times
+        t_patch_wheel = np.array(t_patch_wheel).reshape([-1, 2])
+        diff = (t_patch_sound[:n_patch] - t_patch_wheel)[1:, :] # ignore first patch
             
-            # Update in_patch indices
-            idx_in_patch[i] = in_patch
-
-        # Drop last patch-interpatch sequence
-        t_patch_wheel = np.array(t_patch_wheel)
-        idx_patch_wheel = np.array(idx_patch_wheel)
-        if t_patch_wheel.shape[0] % 2 == 1: 
-            # End in patch: drop last patch entry
-            t_stop = t_patch_wheel[-1]
-            idx_stop = idx_patch_wheel[-1]
-            t_patch_wheel = t_patch_wheel[:-1]
-            idx_patch_wheel = idx_patch_wheel[:-1]
-        else: 
-            # End in interpatch: drop last patch entry and exit
-            t_stop = t_patch_wheel[-2]
-            idx_stop = idx_patch_wheel[-2]
-            t_patch_wheel = t_patch_wheel[:-2]
-            idx_patch_wheel = idx_patch_wheel[:-2]
-
-        # Reshape
-        t_patch_wheel = t_patch_wheel.reshape([-1, 2])
-        idx_patch_wheel = idx_patch_wheel.reshape([-1, 2])
-
-        if return_idx:
-            return t_patch_wheel, idx_patch_wheel, idx_in_patch, \
-                t_stop, idx_stop
+        # Fit linear regresion model to patch entry/exit difference 
+        # to estimate clock drift.
+        model = LinearRegression()
+        if event.lower() == 'entry':
+            j = 0
+        elif event.lower() == 'exit':
+            j = 1
         else:
-            return t_patch_wheel, idx_in_patch, t_stop
+            raise SyntaxError('Unknown event \'{}\'.'.format(event))
+        model.fit(t_patch_sound[1:n_patch, j], diff[:, j])
+
+        return model
 
     def get_wheel_times(self):
         # Requirements
@@ -1007,6 +1145,10 @@ class LVSession(Session):
         t_patch_wheel, idx_patch_wheel, _, t_stop, idx_stop = \
             self._get_patches_from_wheel(return_idx=True)
         t_wheel = self.data['wheel_time']
+
+        # Ensure number of patches equal
+        assert (t_patch_sound.shape == t_patch_wheel.shape), \
+               'Sound and wheel data calculated different numbers of patches.'
 
         # Load last analyzable timestamp for interpolation function
         # (corresponds to last patch entry)
@@ -1136,47 +1278,51 @@ class LVSession(Session):
         return pupil
 
 
-class FreeSession(Session):
+class FreeSession(LVSession):
 
-    def __init__(self, filename):
+    def __init__(self, *,
+                 filename=None,
+                 sess_filepath=None,
+                 pupil_filepath=None):
         # Initialize Session
-        super().__init__(filename)
+        super().__init__(filename=filename,
+                         sess_filepath=sess_filepath,
+                         pupil_filepath=pupil_filepath)
 
         # Set class instance attributes
         self.data_names += ['reward']
-        struct = self.f['Settings']['Property']
-
-        # Run configuration
-        s = 'SoundConfigurationRunConfig'
-        self.settings['run_config'] = {}
-        self.settings['run_config']['session_duration'] = \
-            self._ASCII_to_float(struct[s + 'SessionTimemin'])
-        self.settings['run_config']['noise_level'] = \
-            self._ASCII_to_float(struct[s + 'NoiseLeveldBSPL'])
-        self.settings['run_config']['d_interpatch'] = \
-            self._ASCII_to_float(struct[s + 'InterPatchDistcm'])
-        self.settings['run_config']['d_patch'] = \
-            self._ASCII_to_float(struct[s + 'PatchLengthcm'])
-        self.settings['run_config']['task_type'] = \
-            self._ASCII_to_string(struct[s + 'TaskType'])
-        self.settings['run_config']['teleport'] = \
-            self._ASCII_to_bool(struct[s + 'InPatchTeleport'])
-        self.settings['run_config']['teleport_length'] = \
-            self._ASCII_to_float(struct[s + 'TeleToPatchEndcm'])
-        self.settings['run_config']['r_init'] = \
-            self._ASCII_to_float(struct[s + 'IniVoluL'])
-        self.settings['run_config']['rate_init'] = \
-            self._ASCII_to_float(struct[s + 'IniRateuLsec'])
-        self.settings['run_config']['tau'] = \
-            self._ASCII_to_float(struct[s + 'TCsec'])
-        #self.settings['run_config']['r_low'] = \
-        #    self._ASCII_to_float(struct[s + 'ThresholduL'])
-        self.settings['run_config']['end_target_trial'] = \
-            self._ASCII_to_bool(struct[s + 'Endtargettrial'])
-        self.settings['run_config']['v_leave'] = \
-            self._ASCII_to_float(struct[s + 'VThresholdms']) * 100 # cm/s
-        self.settings['run_config']['end_patch_speed'] = \
-            self._ASCII_to_bool(struct[s + 'Endpatchspeed'])
+        if filename is not None:
+            struct = self.f['Settings']['Property']
+            s = 'SoundConfigurationRunConfig'
+            self.settings['run_config'] = {}
+            self.settings['run_config']['session_duration'] = \
+                self._ASCII_to_float(struct[s + 'SessionTimemin'])
+            self.settings['run_config']['noise_level'] = \
+                self._ASCII_to_float(struct[s + 'NoiseLeveldBSPL'])
+            self.settings['run_config']['d_interpatch'] = \
+                self._ASCII_to_float(struct[s + 'InterPatchDistcm'])
+            self.settings['run_config']['d_patch'] = \
+                self._ASCII_to_float(struct[s + 'PatchLengthcm'])
+            self.settings['run_config']['task_type'] = \
+                self._ASCII_to_string(struct[s + 'TaskType'])
+            self.settings['run_config']['teleport'] = \
+                self._ASCII_to_bool(struct[s + 'InPatchTeleport'])
+            self.settings['run_config']['teleport_length'] = \
+                self._ASCII_to_float(struct[s + 'TeleToPatchEndcm'])
+            self.settings['run_config']['r_init'] = \
+                self._ASCII_to_float(struct[s + 'IniVoluL'])
+            self.settings['run_config']['rate_init'] = \
+                self._ASCII_to_float(struct[s + 'IniRateuLsec'])
+            self.settings['run_config']['tau'] = \
+                self._ASCII_to_float(struct[s + 'TCsec'])
+            #self.settings['run_config']['r_low'] = \
+            #    self._ASCII_to_float(struct[s + 'ThresholduL'])
+            self.settings['run_config']['end_target_trial'] = \
+                self._ASCII_to_bool(struct[s + 'Endtargettrial'])
+            self.settings['run_config']['v_leave'] = \
+                self._ASCII_to_float(struct[s + 'VThresholdms']) * 100 # cm/s
+            self.settings['run_config']['end_patch_speed'] = \
+                self._ASCII_to_bool(struct[s + 'Endpatchspeed'])
     
     def _load_subclass_data(self, name):
         if name == 'reward':

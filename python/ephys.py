@@ -49,7 +49,7 @@ DEFAULT_SORT_PARAMS = {
     'adjacency_radius': -1,
     'detect_sign': -1,
     'detect_threshold': 4,
-    'bursting_parents': True,
+    'bursting_parents': 'true', # must be string to avoid confusion with 1.0
     'clip_size': 100,
     'refrac_msec': 1.0,
     'firing_rate_thresh': 0.1,
@@ -86,8 +86,8 @@ def sort_spikes(*,
     print('done.')
 
     # Annoying bug: booleans must be lowercase strings
-    util.recursive_dict_search(params, True, 'true')
-    util.recursive_dict_search(params, False, 'false')
+    util.recursive_dict_search(params, 'True', 'true')
+    util.recursive_dict_search(params, 'False', 'false')
 
     # File settings
     output_dir = params['output_dir']
@@ -181,6 +181,10 @@ def sort_spikes(*,
                         'noise_overlap_thresh': params['noise_overlap_thresh'],
                         'peak_snr_thresh': params['peak_snr_thresh']},
                     params['opts'])
+
+    # Save sort parameters
+    with open(output_dir + 'sort_params.json', 'w') as f:
+        json.dump(params, f, indent=4)
 
 def track_pipeline_progress(mlclient):
     ### Track progress ###
@@ -2193,19 +2197,51 @@ class Model:
         else:
             raise SyntaxError('Data shape of [' + ','.join([str(n) for n in X.shape]) + '] not understood.')
         
-    def fit(self, X, **kwargs):
+    def fit(self, X, *args, **kwargs):
         X = self._format_data(X)
-        return self._fit(X, **kwargs)
+        return self._fit(X, *args, **kwargs)
     
-    def _fit(self, X, **kwargs):
+    def _fit(self, X, *args, **kwargs):
         raise NotImplementedError
         
-    def predict(self, X, **kwargs):
+    def predict(self, X, *args, **kwargs):
         X = self._format_data(X)
-        return self._predict(X, **kwargs)
+        return self._predict(X, *args, **kwargs)
         
-    def _predict(self, X, **kwargs):
+    def _predict(self, X, *args, **kwargs):
         raise NotImplementedError
+
+class LinearRegression(Model):
+    PARAM_NAMES = ['w']
+
+    def __init__(self):
+        super().__init__()
+        self._name = 'linear-regression'
+
+        # Set parameters
+        self._w = None
+
+    def _params(self):
+        return {'w': self._w}
+
+    def _fit(self, X, y):
+        # Get parameters
+        N = X.shape[0]
+        self._m = X.shape[1]
+
+        # Reformat y if needed
+        if y.ndim == 1:
+            y = y[:, np.newaxis]
+
+        # Fit weights using least-squares regression:
+        # w = (X^T X )^-1 X^T y
+        X = np.hstack([X, np.ones([N, 1])]) # add bias term
+        self._w = np.linalg.inv(X.T.dot(X)).dot(X.T.dot(y))
+
+    def _predict(self, X):
+        N = X.shape[0]
+        X = np.hstack([X, np.ones([N, 1])]) # add bias term
+        return X.dot(self._w)
 
 class KMeans(Model):
     
