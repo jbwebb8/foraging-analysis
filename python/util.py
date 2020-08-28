@@ -778,7 +778,7 @@ def in_interval(t, t1, t2, query='event', include_border=True):
     Args:
     - t (ndarray): 1D array containing time points to query.
     - t1 (ndarray): 1D array containing time points defining interval starts.
-    - t1 (ndarray): 1D array containing time points defining interval ends.
+    - t2 (ndarray): 1D array containing time points defining interval ends.
     - query (str): Specifies the type of information to return.
         - 'event': Returns 1D array of len(t) in which the ith entry corresponds 
             to the number of intervals containing t[i].
