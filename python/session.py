@@ -13,6 +13,12 @@ from helper import smooth_waveform_variance, find_threshold, \
 from util import in_interval, _check_list, dec_to_bin_array, flatten_list
 from ephys import LinearRegression
 
+class BadSession(Exception):
+    """
+    Specifies analysis error due to poor session quality, such as an
+    insufficient number of patches, no harvested rewards, etc.
+    """
+
 class Session:
 
     def __init__(self):
@@ -24,7 +30,7 @@ class Session:
         # Set allowed data and variable names
         self.data_names = ['motor', 'lick', 'fs', 'reward']
         self.var_names = ['T', 't_patch', 'in_patch', 't_stop', 
-                          't_motor', 'dt_motor', 'n_motor_rem',
+                          't_motor', 'dt_motor', 'n_motor_rem', 't_motor_all',
                           't_lick']
 
         # Set placeholders
@@ -123,6 +129,13 @@ class Session:
     def _get_patch_times_from_signal(self, in_patch, fs, drop_last=True):
         # Find patch start points
         t_patch_start = np.argwhere((in_patch - np.roll(in_patch, -1)) == -1).flatten()
+        if len(t_patch_start) == 0:
+            # No detectable patches from signal
+            # NOTE: For now, not having any patches from one signal source
+            # means either no (LabVIEW) or one (TreadmillIO) patch for the
+            # entire session, which is not worth analyzing. However, this
+            # error behavior may change for future experimental designs.
+            raise BadSession('No patches detected on signal.')
         if (in_patch[-1] == 0) and (in_patch[0] == 1):
             # Correct wrap-around error
             t_patch_start = t_patch_start[:-1]
@@ -202,19 +215,25 @@ class Session:
     def _get_motor_times(self, var_name='t_motor'):
         # Requirements
         req_data = ['motor', 'fs']
-        req_vars = ['t_stop']
+        if var_name == 't_motor_all':
+            req_vars = None
+        else:
+            req_vars = ['t_stop']
         self._check_attributes(data_names=req_data, var_names=req_vars)
 
         # Find motor timestamps and durations
-        if var_name in ['t_motor', 'dt_motor']:
+        if var_name in ['t_motor', 'dt_motor', 't_motor_all']:
             thresh = np.max(self.data['motor']) / 2.0 # half of 5V square wave
-            idx_stop = int(self.vars['t_stop'] * self.data['fs'])
-            motor = self.data['motor'][:idx_stop]
+            if var_name == 't_motor_all':
+                motor = self.data['motor']
+            else:
+                idx_stop = int(self.vars['t_stop'] * self.data['fs'])
+                motor = self.data['motor'][:idx_stop]
             is_pump, idx_pump_start, idx_pump_end = self._find_threshold_crossings(motor, thresh)
             t_motor = idx_pump_start / self.data['fs']
             dt_motor = (idx_pump_end - idx_pump_start) / self.data['fs']
 
-            if var_name == 't_motor':
+            if var_name in ['t_motor', 't_motor_all']:
                 return t_motor
             elif var_name == 'dt_motor':
                 return dt_motor
@@ -391,16 +410,18 @@ class Session:
 class TTSession(Session):
 
     SAMPLING_RATE = 500 # serial transmission rate of microprocessor (Hz)
-    BOARD_IDS = [16, 17, 22, 23, 24, 25, 26, 27] # GPIO IDs
+    BOARD_IDS = [16, 17, 22, 23, 24, 25, 26, 27] # GPIO IDs for version 0.x
     REWARD_VOLUME = 2.0 # uL
 
     def __init__(self, *, 
                  data=None, 
                  params=None,
-                 sess_filepath=None):
+                 sess_filepath=None,
+                 version=0.0):
         """Session for data acquired on TreadmillTracker system"""
 
         Session.__init__(self)
+        self.version = version
 
         # Load files
         self.raw_data = data
@@ -416,10 +437,16 @@ class TTSession(Session):
             if self.params is not None:
                 GPIO_labels = {}
                 for k, v in self.params['GPIO'].items():
-                    if v in self.BOARD_IDS:
-                        GPIO_labels[k] = self.BOARD_IDS.index(v)
+                    if self.version < 1.0:
+                        if v in self.BOARD_IDS:
+                            GPIO_labels[k] = self.BOARD_IDS.index(v)
+                        else:
+                            GPIO_labels[k] = None
                     else:
-                        GPIO_labels[k] = None
+                        if 'Number' in v:
+                            GPIO_labels[k] = v['Number'] - 1 # convert to 0-indexed
+                        else:
+                            GPIO_labels[k] = None
                 self.settings['GPIO_labels'] = GPIO_labels
         else:
             self.load(sess_filepath)
@@ -440,8 +467,14 @@ class TTSession(Session):
             n_motor = len(self.vars['t_motor']) + self.vars['n_motor_rem']
             return self.REWARD_VOLUME*np.ones([n_motor])
         elif name == 'GPIO':
-            return dec_to_bin_array(self.raw_data[:, self.params['Data']['GPIO']], 
-                                    bits=8, 
+            if self.version < 1.0:
+                idx = self.params['Data']['GPIO']
+                bits = 8
+            else:
+                idx = 1
+                bits = 12
+            return dec_to_bin_array(self.raw_data[:, idx], 
+                                    bits=bits, 
                                     bit_order='<')
         elif name == 't_m':
             return self.raw_data[:, self.params['Data']['MasterTime']]
@@ -453,7 +486,7 @@ class TTSession(Session):
             return self.raw_data.shape[0]
         elif name in ['t_patch', 'in_patch', 't_stop']:
             return self._get_patch_times(name)
-        elif name in ['t_motor', 'dt_motor', 'n_motor_rem']:
+        elif name in ['t_motor', 'dt_motor', 'n_motor_rem', 't_motor_all']:
             return self._get_motor_times(name)
         elif name == 't_lick':
             return self._get_lick_times()
@@ -481,14 +514,39 @@ class TTSession(Session):
         self._check_attributes(data_names=req_data, var_names=req_vars)
             
         # Get GPIO pins
-        pins = self._get_GPIO_pins('dispense')
+        if self.version < 1.0:
+            pins = self._get_GPIO_pins('dispense')
+        else:
+            pins = self._get_GPIO_pins('reward')
+        if len(pins) == 0:
+            raise SyntaxError('GPIO pins for reward not found.')
 
         # Add motor traces
         motor = np.zeros([self.vars['T']])
         for pin in pins:
             motor += self.data['GPIO'][:, pin]
 
-        if (motor < 0).any() or (motor >  1).any():
+        # BUG: Interface.connect() configures all pins first as input, which
+        # when switched to output for the reward pins, triggers a false HIGH
+        # value for an arbitrary number of initial readings (I think).
+        # Unfortunately, this can lag several samples into the experiment,
+        # so we need to check within an arbitrary initial number of samples
+        # (20 samples = 40 ms?).
+        if self.version >= 1.0:
+            # Correct initial prolonged HIGH values
+            i = 0
+            while motor[i] > 0:
+                motor[i] = 0
+                i += 1
+
+            # Correct simultaneous HIGH values or aberrant signals in first 40 ms
+            i = max(i, 1)
+            while i < 20:
+                if motor[i] > 1 or np.equal(motor[i-1:i+2], np.array([0, 1, 0])).all():
+                    motor[i] = 0
+                i += 1
+
+        if (motor < 0).any() or (motor > 1).any():
             raise ValueError('Motor trace cannot be interpreted due to'
                              ' overlapping rewards and/or negative values.')
         else:
@@ -513,8 +571,8 @@ class TTSession(Session):
                              ' negative values.')
         elif (lick > 1).any():
             warnings.warn('Licks detected simultaneously on multiple sensors.')
-        else:
-            return lick
+        
+        return lick
 
     def _get_patch_times(self, var_name='t_patch'):
         # Get patch signal
@@ -559,6 +617,8 @@ class TTSession(Session):
 
             # Apply nose poke smoothing
             t_patch_i = self._smooth_patch_times(t_patch_i)
+            if t_patch_i.shape[0] == 0:
+                raise BadSession('No patches for sensor {}.'.format(pin))
 
             # Log timestamps
             t_patch.append(t_patch_i)
@@ -599,6 +659,10 @@ class TTSession(Session):
 
     def _smooth_patch_times(self, t_patch):
         """Applies nose poke sensor smoothing to patch entry/exit."""
+        # Check requirements
+        req_vars = ['t_motor_all']
+        self._check_attributes(var_names=req_vars)
+
         # Check shape
         if t_patch.ndim != 2:
             raise SyntaxError('t_patch must be 2D array'
@@ -608,23 +672,94 @@ class TTSession(Session):
                               ' but is N x %d.' % t_patch.shape[1])
 
         # Get entry/exit delay parameters
-        entry_delay = self.params['Delay'].get('PokeEntryDelay', 0)/1000
-        exit_delay = self.params['Delay'].get('PokeExitDelay', 0)/1000
+        if self.version < 1.0:
+            # Version 0.x syntax
+            entry_delay = self.params['Delay'].get('PokeEntryDelay', 0)/1000
+            exit_delay = self.params['Delay'].get('PokeExitDelay', 0)/1000
+        else:
+            # Version 1.x syntax (must search state machine)
+            entry_delay = None
+            exit_delay = None
+            pump_on_delay = None
+            pump_off_delay = None
+            for state, state_params in self.params['StateMachine']['States'].items():
+                if 'Entering' in state:
+                    for next_state, params in state_params['NextState'].items():
+                        if params['ConditionType'].lower() == 'elapsedtime':
+                            if entry_delay is None:
+                                entry_delay = params['Duration']
+                            else:
+                                assert entry_delay == params['Duration'] 
+                elif 'Leaving' in state:
+                    for next_state, params in state_params['NextState'].items():
+                        if params['ConditionType'].lower() == 'elapsedtime':
+                            if exit_delay is None:
+                                exit_delay = params['Duration']
+                            else:
+                                assert exit_delay == params['Duration']
+                elif 'PumpOnDelay' in state:
+                    if pump_on_delay is None:
+                        pump_on_delay = state_params['Params']['Value']
+                    else:
+                        assert pump_on_delay == state_params['Params']['Value']
+                elif 'PumpOffDelay' in state:
+                    if pump_off_delay is None:
+                        pump_off_delay = state_params['Params']['Value']
+                    else:
+                        assert pump_off_delay == state_params['Params']['Value']
+            
+            # Default to zero if not found
+            if entry_delay is None:
+                entry_delay = 0
+            if exit_delay is None:
+                exit_delay = 0
+            if pump_on_delay is None:
+                pump_on_delay = 0
+            if pump_off_delay is None: 
+                pump_off_delay = 0
+
+            # Convert to seconds
+            entry_delay /= 1000
+            exit_delay /= 1000
+            pump_delay = (pump_on_delay + pump_off_delay)/1000
         
         # Flatten t_patch into list
         t_patch = list(t_patch.reshape([-1], order='C'))
 
         # Iterate through flattened list
+        f = lambda j: (t_patch[j+2] - self.vars['t_motor_all']) # time since last reward
         i = 0 # index of current patch start
+        # NOTE: Because we're using equalities for floating points (i.e. 
+        # specifying an exact sample period), we need to use math.isclose()
+        # (Python >= 3.5) to account for floating point errors. For example,
+        # if the break in the poke sensor is exactly entry_delay seconds, the
+        # patches may not be merged due to floating point errors making the
+        # subtraction slightly greater than entry_delay seconds.
+        def isclose_lte(x, y):
+            return ((x < y) or np.isclose(x, y))
         while (i < len(t_patch)):
-            if t_patch[i+1] - t_patch[i] < entry_delay:
+            if isclose_lte(t_patch[i+1] - t_patch[i], 
+                           entry_delay + (entry_delay > 0.0)*(2*(1.0/self.data['fs']))):
                 # Remove patch if min entry period not met
+                # NOTE: The entry requirements can cause the clock to delay an
+                # extra couple of samples due to state changes, so we need to
+                # buffer the entry_delay period with a couple of additional
+                # sample periods. This only applies when a separate "Entering"
+                # state exists.
                 del t_patch[i:i+2]
             elif i == len(t_patch) - 2:
                 # Avoid error at end of list
                 break
-            elif t_patch[i+2] - t_patch[i+1] <= exit_delay:
+            elif isclose_lte(t_patch[i+2] - t_patch[i+1],
+                             exit_delay + 2*(1.0/self.data['fs'])) or \
+                 isclose_lte(f(i)[f(i) > 0.0].min(initial=np.inf),
+                             exit_delay + pump_delay):
                 # Merge with next patch if min exit period not met
+                # NOTE: Because triggering a reward causes a 200+ ms delay
+                # prior to reading poke sensor, the animal could unpoke longer
+                # than the exit delay and still remain in the current patch as 
+                # long as it repokes within the exit delay since the last 
+                # sensor reading.
                 del t_patch[i+1:i+3]
             else:
                 # Otherwise, jump to next patch
@@ -670,19 +805,55 @@ class TTSession(Session):
 
         # Grab session settings
         try:
-            R_0 = self.params['Reward']['R_0']
-            r_0 = self.params['Reward']['r_0']
-            tau = self.params['Reward']['tau']
+            if self.version < 1.0:
+                # Read directly from params file
+                R_0 = self.params['Reward']['R_0']
+                r_0 = self.params['Reward']['r_0']
+                tau = self.params['Reward']['tau']
+            else:
+                # Search through state machine
+                R_0 = np.array([0.0])
+                r_0 = []
+                tau = []
+                for state, state_params in self.params['StateMachine']['States'].items():
+                    if state_params.get('Type', None) == 'Patch':
+                        V_0 = state_params['Params']['ModelParams']['V0']
+                        lambda_0 = state_params['Params']['ModelParams']['lambda0']
+                        r_0.append(V_0*lambda_0)
+                        tau.append(state_params['Params']['ModelParams']['tau'])
+                
+                # Convert to 1D arrays
+                if len(r_0) == 0 or len(tau) == 0:
+                    raise KeyError # throw error if params not found
+                else:
+                    r_0 = np.asarray(r_0)
+                    tau = np.asarray(tau)
+
+                # Find unique parameter sets
+                _, keep_idx = np.unique(np.vstack((r_0, tau)), return_index=True, axis=1)
+                r_0 = r_0[keep_idx]
+                tau = tau[keep_idx]
+
+                # Broadcast other parameters to same array shape
+                assert r_0.shape == tau.shape
+                t_t_min = np.broadcast_to(np.asarray(t_t_min), r_0.shape)
+                R_0 = np.broadcast_to(R_0, r_0.shape)
+
         except KeyError:
             raise UserWarning('Reward depletion parameters not specified.')
 
         # Minimum travel time: R_0 / r_0
-        t_p_opt, r_opt = get_optimal_values(t_t=t_t_min, R_0=R_0, r_0=r_0, tau=tau)
+        multipatch = (len(r_0) > 1)
+        t_p_opt, r_opt = get_optimal_values(t_t=t_t_min, 
+                                            R_0=R_0, 
+                                            r_0=r_0, 
+                                            tau=tau, 
+                                            multipatch=multipatch)
         
         if return_all:
-            return r_opt / (t_p_opt + t_t), r_opt, t_p_opt, t_t_min
+            return r_opt / (t_p_opt + t_t_min), r_opt, t_p_opt, t_t_min
         else:
-            return r_opt / (t_p_opt + t_t)
+            return r_opt / (t_p_opt + t_t_min)
 
     def calculate_reward_times(self):
         """

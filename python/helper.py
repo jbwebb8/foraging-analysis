@@ -1,6 +1,6 @@
 import numpy as np
 from scipy import signal
-from scipy.optimize import broyden1
+from scipy.optimize import broyden1, root
 from scipy.optimize.nonlin import NoConvergence
 import warnings
 
@@ -196,15 +196,17 @@ def random_slice(X, axis=0):
 
         return X[idx]
 
-def _broyden1(f, x_init, max_iter=10000, min_value=-np.inf, max_value=np.inf):
-    soln = broyden1(f, x_init, maxiter=max_iter)
+def _broyden1(f, x_init, args=(), max_iter=10000, min_value=-np.inf, max_value=np.inf):
+    soln = root(f, x_init, method='broyden1', args=args, options={'maxiter': max_iter})
     if min_value is None:
         min_value = -np.inf
     if max_value is None:
         max_value = np.inf
-    if (soln < min_value).any() or (soln > max_value).any():
+    if not soln.success:
+        raise NoConvergence(soln.message)
+    elif (soln.x < min_value).any() or (soln.x > max_value).any():
         raise OverflowError('Solution outside of allowed range.')
-    return soln
+    return soln.x
 
 
 def _solve_mvt_equation(*, F_log, F_exp, x_init, verbose=False, **kwargs):
@@ -226,7 +228,8 @@ def get_optimal_values(*, t_p=None,
                        tau=None,
                        return_solvable=False,
                        min_value=None,
-                       max_value=None):
+                       max_value=None,
+                       multipatch=False):
     """
     Returns optimal value based on the marginal value theorem, based on values
     of other parameters.
@@ -238,12 +241,41 @@ def get_optimal_values(*, t_p=None,
     - r_0: Initial reward rate.
     - tau: Decay constant.
     - return_solvable: If True, return array of whether each point is solvable.
+    - multipatch: If True, solve environment with multiple patch types.
 
     Returns:
     - opt: Optimal value of unknown parameter.
     - R_opt: Amount of cumulative reward at optimal leaving time.
     - is_solvable: Array where True means data point has solution.
     """
+    if multipatch:
+        return _get_optimal_values_multi_type(t_p=t_p, 
+                                              t_t=t_t, 
+                                              R_0=R_0, 
+                                              r_0=r_0, 
+                                              tau=tau,
+                                              return_solvable=return_solvable,
+                                              min_value=min_value,
+                                              max_value=max_value)
+    else:
+        return _get_optimal_values_one_type(t_p=t_p, 
+                                            t_t=t_t, 
+                                            R_0=R_0, 
+                                            r_0=r_0, 
+                                            tau=tau,
+                                            return_solvable=return_solvable,
+                                            min_value=min_value,
+                                            max_value=max_value)
+                                        
+
+def _get_optimal_values_one_type(*, t_p=None, 
+                                 t_t=None, 
+                                 R_0=None, 
+                                 r_0=None, 
+                                 tau=None,
+                                 return_solvable=False,
+                                 min_value=None,
+                                 max_value=None):
     # Assert one unknown
     loc = [t_p, t_t, R_0, r_0, tau]
     n_unknown = len([kwarg for kwarg in loc if kwarg is None])
@@ -296,7 +328,7 @@ def get_optimal_values(*, t_p=None,
                             # Solve non-linear equation for residence time (logarithmic form more numerically stable)
                             [t_t_, R_0_, r_0_, tau_] = [p[idx] for p in loc if p is not None ]
                             F_log = lambda x: (np.log(r_0_) - (x / tau_) + np.log(t_t_ + x + tau_) - np.log((r_0_ * tau_) + R_0_))
-                            F_exp = lambda x: (r_0_ * np.nexp(-x/tau_) * (t_t_ + x + tau_)) - (r_0_ * tau_) - R_0_
+                            F_exp = lambda x: (r_0_ * np.exp(-x/tau_) * (t_t_ + x + tau_)) - (r_0_ * tau_) - R_0_
                             t_p[idx] = _solve_mvt_equation(F_log=F_log, F_exp=F_exp, x_init=tau_, min_value=min_value, max_value=max_value)
                             solved[idx] = True # update successful solutions
                     break # stop if found solution for all indices
@@ -386,5 +418,120 @@ def get_optimal_values(*, t_p=None,
     
     if return_solvable:
         return opt, R_opt, is_solvable
+    else:
+        return opt, R_opt
+
+def _get_optimal_values_multi_type(*, t_p=None, 
+                                   t_t=None, 
+                                   R_0=None, 
+                                   r_0=None, 
+                                   tau=None,
+                                   return_solvable=False,
+                                   min_value=None,
+                                   max_value=None):
+    # Assert one unknown
+    loc = [t_p, t_t, R_0, r_0, tau]
+    n_unknown = len([kwarg for kwarg in loc if kwarg is None])
+    if n_unknown < 1:
+        raise SyntaxError('No unknowns.')
+    elif n_unknown > 1:
+        raise SyntaxError('Too many unknowns. Please specify all but one parameter.')
+
+    # Determine number of patches
+    loc = [_to_array(kwarg) if kwarg is not None else None 
+           for kwarg in loc]
+    shape = None
+    for p in loc:
+        if p is None:
+            continue
+        elif shape is None:
+            shape = p.shape
+        elif shape != p.shape:
+            raise SyntaxError('All inputs must have the same shape for multipatch'
+                              + ' calculation ({} does not match {}).'.format(p.shape, shape))
+    if len(shape) == 1:
+        shape = (1, shape[0])
+    elif len(shape) > 2:
+        raise SyntaxError('Parameter rank must be 1 or 2 only but is {}.'.format(len(shape)))
+    [t_p, t_t, R_0, r_0, tau] = loc
+    M = shape[0] # number of environments to solve
+    N = shape[1] # number of patch types
+
+    # Create reward expressions
+    r = lambda t_p, tau, r_0: r_0*np.exp(-t_p/tau)
+    R = lambda t_p, tau, r_0, R_0: r_0*tau*(1.0 - np.exp(-t_p/tau)) + R_0
+
+    # Define system of non-linear equations:
+    # r_i(t_p_i)*(sum(t_t) + sum(t_p)) - sum(R(t_p) - s*t_t) = 0
+    def F(x, idx):
+        # Pre-process parameters for system of non-linear equations
+        nonlocal t_p, t_t, r_0, R_0, tau # grab argument values from above
+        X = np.zeros((5,) + (1,)*(x.ndim == 1) + x.shape) # all parameters
+        for i, p in enumerate([t_p, t_t, r_0, R_0, tau]):
+            if p is None:
+                X[i] = x
+            else:
+                X[i] = p[idx]
+        
+        # Pre-compute sums before loop
+        sum_R = np.sum(np.vstack([R(X[0,:,i], X[4,:,i], X[2,:,i], X[3,:,i]) for i in range(N)]).T, axis=1)
+        sum_T = np.sum(X[0,:,:], axis=1) + np.sum(X[1,:,:], axis=1)
+        
+        # Loop through each patch type
+        y = np.zeros((1,)*(x.ndim == 1) + x.shape)
+        for i in range(N):
+            y[:, i]= r(X[0,:,i], X[4,:,i], X[2,:,i])*sum_T - sum_R
+
+        return y
+
+    # Because we created a generic function to optimize, we can use the same loop for
+    # any unknown variable. The only difference is the initial value for the function
+    # solver.
+    if t_p is None:
+        x_init = tau
+    elif t_t is None:
+        # Without search cost, only the sum of travel times matters to the solution.
+        # Thus we will make the initial value the same for each row to give a solution
+        # with equal travel times for all patches.
+        x_init = np.mean(t_p, axis=1, keepdims=True)*np.ones(shape)
+    elif tau is None:
+        x_init = t_p
+    with np.errstate(divide='raise', invalid='raise'): # force to raise error to catch
+        depth = 0 # depth of indices to iterate over
+        opt = np.empty(shape) # initialize empty solution array
+        solved = np.zeros(shape, dtype=np.bool) # track which elements have been solved
+        while depth < len(shape):
+            try:
+                # Iterate over indices at depth of dimension
+                for idx in np.ndindex(shape[:depth]):
+                    if not solved[idx].all():
+                        # Solve system of non-linear equations
+                        opt[idx] = _broyden1(F, x_init[idx],
+                                             args=(idx,),
+                                             min_value=min_value, 
+                                             max_value=max_value)
+                        solved[idx] = True # update successful solutions
+                break # stop if found solution for all indices
+            except (NoConvergence, FloatingPointError, OverflowError) as error:
+                # Catch numerical errors and try at deeper iteration
+                depth += 1
+                if depth == len(shape):
+                    # We cannot iterate element by element because multipatch 
+                    # case requires solving system as whole.  
+                    raise NoConvergence('Failed to coverge to solution.')
+                else:
+                    print('Solution failed. Attempting to solve at depth {} (of max {})...'
+                            .format(depth, len(shape)))
+    
+    # Calculate total harvested reward for optimal residence time
+    params = [p if p is not None else opt for p in [t_p, R_0, r_0, tau]]
+    R_opt = cumulative_reward(*params)
+    
+    # Return number if only one value queried
+    if isinstance(opt, np.ndarray) and not isinstance(R_opt, np.ndarray):
+        opt = float(opt)
+    
+    if return_solvable:
+        return opt, R_opt, solved
     else:
         return opt, R_opt
