@@ -4,7 +4,7 @@ import re
 import struct
 import time
 from tempfile import TemporaryFile
-import json
+import json, yaml
 import gc
 
 # Google Drive API
@@ -245,12 +245,14 @@ class GoogleDriveService:
         - file_metadata: Dict containing metadata of uploaded file.
 
         Useful resources:
-        - Google Drive API upload help: 
+        - Google Drive API upload help (see HTTP code): 
           https://developers.google.com/drive/api/v3/manage-uploads
         - Google Drive API http source code:
           https://github.com/googleapis/google-api-python-client/blob/master/googleapiclient/http.py#L872
         - httplib2 help (e.g. self._service._http):
           https://httplib2.readthedocs.io/en/latest/libhttplib2.html#http-objects
+        - Google Drive API multipart upload help:
+          https://stackoverflow.com/a/38475303
         """
         # Check parameters
         if (chunk_size % 1024*256 != 0):
@@ -273,54 +275,79 @@ class GoogleDriveService:
             folder_ids = [] # store in MyDrive
         elif not isinstance(folder_ids, list):
             folder_ids = [folder_ids]
-
-        # Initiate resumable session by uploading file metadata
         file_metadata = {'name': filename,
                         'parents': folder_ids}
-        body = json.dumps(file_metadata)
-        headers = {'X-Upload-Content-Type': mime_type,
-                   'X-Upload-Content-Length': str(total_size),# size of entire file,
-                   'Content-Type': 'application/json; charset=UTF-8', # use metadata
-                   'Content-Length': str(len(body)) # size of metadata
-                  }
-        init_uri = self.BASE_UPLOAD_URI + '?uploadType=resumable'
-        response, content = self._service._http.request(init_uri, 
-                                                        method='POST',
-                                                        body=body,
-                                                        headers=headers)
-        
-        # Get resumable upload URI if session successfully initiated
-        if response['status'] == '200':
-            upload_uri = response['location']
-        else:
-            self._raise_http_error(response, content)
 
-        # Upload in chunks until complete
-        start = 0
-        while (start == 0) or (response['status'] == '308'):
-            # Get next chunk
-            f.seek(start, os.SEEK_SET) # set pointer
-            chunk = f.read(chunk_size) # read next chunk
-            chunk_size_ = len(chunk) # if chunk is less than max size
-            end = start + chunk_size_ - 1
-
-            # Upload chunks to upload uri
-            headers = {'Content-Range': 'bytes %d-%d/%d' % (start, end, total_size),
-                       'Content-Length': str(chunk_size_)}
-            response, content = self._service._http.request(upload_uri, 
-                                                            method='PUT',
-                                                            body=chunk,
+        # If text requires multiple upload requests, or uploading media object,
+        # use resumable session
+        if total_size > chunk_size or 'text' not in mime_type: 
+            # Initiate resumable session by uploading file metadata
+            body = json.dumps(file_metadata)
+            headers = {'X-Upload-Content-Type': mime_type,
+                       'X-Upload-Content-Length': str(total_size),# size of entire file,
+                       'Content-Type': 'application/json; charset=UTF-8', # use metadata
+                       'Content-Length': str(len(body)) # size of metadata
+                      }
+            init_uri = self.BASE_UPLOAD_URI + '?uploadType=resumable'
+            response, content = self._service._http.request(init_uri, 
+                                                            method='POST',
+                                                            body=body,
                                                             headers=headers)
-
-            # Print progress update
-            if verbose and (self._progress(end+1, total_size) > self._progress(start, total_size)):
-                print('%d%% complete...' % self._progress(end+1, total_size))
             
-            # Update pointer index
-            if 'range' in response:
-                start = int(response['range'].split('-')[-1]) + 1
+            # Get resumable upload URI if session successfully initiated
+            if response['status'] == '200':
+                upload_uri = response['location']
             else:
-                start = end + 1
+                self._raise_http_error(response, content)
+
+            # Upload in chunks until complete
+            start = 0
+            while (start == 0) or (response['status'] == '308'):
+                # Get next chunk
+                f.seek(start, os.SEEK_SET) # set pointer
+                chunk = f.read(chunk_size) # read next chunk
+                chunk_size_ = len(chunk) # if chunk is less than max size
+                end = start + chunk_size_ - 1
+
+                # Upload chunks to upload uri
+                headers = {'Content-Range': 'bytes %d-%d/%d' % (start, end, total_size),
+                           'Content-Length': str(chunk_size_)}
+                response, content = self._service._http.request(upload_uri, 
+                                                                method='PUT',
+                                                                body=chunk,
+                                                                headers=headers)
+
+                # Print progress update
+                if verbose and (self._progress(end+1, total_size) > self._progress(start, total_size)):
+                    print('%d%% complete...' % self._progress(end+1, total_size))
+                
+                # Update pointer index
+                if 'range' in response:
+                    start = int(response['range'].split('-')[-1]) + 1
+                else:
+                    start = end + 1
+
+        # If upload text in single request, use multipart session
+        else: 
+            # Reset file pointer to beginning
+            f.seek(0, os.SEEK_SET)
+
+            # Create body text
+            body = '--boundary\nContent-Type: application/json; charset=UTF-8\n\n'
+            body += json.dumps(file_metadata) + '\n\n'
+            body += '--boundary\nContent-Type: {}\n\n'.format(mime_type) + str(f.read()) + '\n'
+            body += '--boundary--'
+            
+            # Create top-level headers
+            headers = {'Content-Type': 'multipart/related; boundary=boundary',
+                       'Content-Length': str(len(body))}
+            
+            # Upload file
+            upload_uri = self.BASE_UPLOAD_URI + '?uploadType=multipart'
+            response, content = self._service._http.request(upload_uri, 
+                                                            method='POST',
+                                                            body=body,
+                                                            headers=headers)
         
         # Handle outcomes
         if response['status'] in ['200', '201']:
@@ -355,7 +382,8 @@ class GoogleDriveService:
                       filename=None, 
                       mime_type=None,
                       exact_match=False,
-                      parent=None):
+                      parent=None,
+                      ignore_trash=True):
         """
         Search for file IDs given criteria. Remember that folders are considered
         files with the MIME type 'application/vnd.google-apps.folder'.
@@ -404,6 +432,14 @@ class GoogleDriveService:
             else:
                 c = ''
             q += "{}{}".format(c, p)
+
+        # Ignore trashed files
+        if ignore_trash:
+            if len(q) > 0:
+                c = ' and '
+            else:
+                c = ''
+            q += "{}trashed = false".format(c)
 
         # Query for files
         if len(q) > 0:
@@ -698,17 +734,14 @@ def bytes_to_object(chunk, ob_type='numpy', load_fn=None):
     temp.seek(0, 0)
 
     # Create object
-    if ob_type == 'numpy':
-        if load_fn == None:
-            obj = np.load(temp)
-        else:
-            obj = load_fn(temp)
-
+    if load_fn is not None:
+        obj = load_fn(temp)
+    elif ob_type == 'numpy':
+        obj = np.load(temp)
     elif ob_type == 'json':
-        if load_fn == None:
-            obj = json.load(temp)
-        else:
-            obj = load_fn(temp)
+        obj = json.load(temp)
+    elif ob_type == 'yaml':
+        obj = yaml.safe_load(temp)
     else:
         raise SyntaxError('Unknown object type \'%s\'.' % ob_type)
 
@@ -945,6 +978,8 @@ def get_patch_statistics(stats,
         idx = ~np.isnan(stats_all)
         stats_all = stats_all[idx]
         ids_all = ids_all[idx]
+        for i in range(n_args):
+            args_all[i] = args_all[i][idx]
 
     # Calculate desired metric for all points with given id
     if method == 'mean':
