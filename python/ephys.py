@@ -1480,6 +1480,7 @@ class GPFA(LatentModel):
         self._tau = tau_new
         self._update_K()
 
+    # TODO: Incoporate auto-fit (_fit_GP_auto, _neg_logE_XY) into class
     def _fit_GP_auto(self, sigma_f, sigma_n, E_xiTxi, use_grad=True):
         logE = lambda log_tau: _neg_logE_XY(log_tau, sigma_f, sigma_n, E_xiTxi, return_grad=use_grad)
         res = minimize(logE, np.log(tau), jac=use_grad)
@@ -2002,6 +2003,12 @@ class Gaussian(Distribution):
         else:
             return self._multivariate_cdf(m-2, r) - r**(m-2)*np.exp(-0.5*r**2)/(m-2)
     
+    def _inv_cdf(self, q):
+        if self._m == 1:
+            return stats.norm.ppf(q, loc=self._mu, scale=np.sqrt(self._Sigma))
+        else:
+            raise NotImplementedError('Inverse cdf not yet implemented for multivariate Gaussian.')
+    
     def distance(self, X):
         """
         Returns the Mahalanobis distance between sample x and model mean mu:
@@ -2211,6 +2218,14 @@ class Model:
     def _predict(self, X, *args, **kwargs):
         raise NotImplementedError
 
+    def goodness_of_fit(self, X, *args, **kwargs):
+        X = self._format_data(X)
+        return self._goodness_of_fit(X, *args, **kwargs)
+        
+    def _goodness_of_fit(self, X, *args, **kwargs):
+        raise NotImplementedError
+
+
 class LinearRegression(Model):
     PARAM_NAMES = ['w']
 
@@ -2242,6 +2257,23 @@ class LinearRegression(Model):
         N = X.shape[0]
         X = np.hstack([X, np.ones([N, 1])]) # add bias term
         return X.dot(self._w)
+
+    def _goodness_of_fit(self, X, y, method='r_squared'):
+        # Format data
+        N = X.shape[0]
+        if y.ndim == 1:
+            y = y[:, np.newaxis]
+        elif y.ndim > 2:
+            raise SyntaxError('y must be a 1D or 2D array.')
+        
+        # Compute components 
+        # (see e.g. https://online.stat.psu.edu/stat462/node/95/)
+        y_hat = self.predict(X)
+        y_mean = np.mean(y, axis=0)
+        SSR = np.sum((y_hat - y_mean)**2) # regression sum of squares
+        SST = np.sum((y - y_mean)**2) # total sum of squares
+        return SSR/SST
+
 
 class KMeans(Model):
     
