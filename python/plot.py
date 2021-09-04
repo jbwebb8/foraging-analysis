@@ -2,6 +2,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import math
+import random
 from util import get_patch_statistics, _check_list, in_interval
 
 class Plotter:
@@ -503,7 +504,8 @@ class Plotter:
                                c=0.5,
                                figsize=(15, 15),
                                new_fig=True,
-                               plot_subjects=True):
+                               plot_subjects=True,
+                               plot_scatter=False):
         # Create new figure
         if new_fig:
             self.create_new_figure(figsize=figsize)
@@ -523,9 +525,51 @@ class Plotter:
             gt = (cond_order[np.newaxis, :] > np.array(exclude_cond)[:, np.newaxis])
             cond_order -= np.sum(gt, axis=0)
         
+        # Plot combined data
+        # Get consolidated data across animals
+        d_plot, cond_plot = get_patch_statistics(data, 
+                                            ids=cond, 
+                                            method=center, 
+                                            return_all=False)
+        d_err, cond_plot = get_patch_statistics(data, 
+                                            ids=cond, 
+                                            method=center, 
+                                            return_all=False)
+        
+        # Exclude condition data
+        idx = ~np.isin(cond_plot, exclude_cond)
+        d_plot = d_plot[idx]
+        d_err = d_err[idx]
+        cond_plot = cond_plot[idx]
+
+        # Plot consolidated data
+        x = np.arange(len(cond_plot)) + plot_subjects*len(data.keys())*(len(cond_plot) + 1)
+        yerr = np.vstack([np.zeros(len(d_err)), d_err])
+        self.ax.bar(x, 
+                    d_plot[cond_order], 
+                    yerr=yerr[:, cond_order],
+                    color=self.cmap(c))
+        
+        # Format axis
+        self.ax.set_xticks([]) # clear default ticks
+        self.ax.set_xticklabels([]) # clear default labels
+        xticks = self.ax.get_xticks()
+        self.ax.set_xticks(list(xticks) + list(x))
+        xtick_labels = [label._text for label in self.ax.get_xticklabels()
+                        if label._text != '']
+        new_labels = [', '.join([str(p) for p in params]) for key, params in cond_params.items()
+                    if key not in exclude_cond]
+        new_labels = [new_labels[i] for i in cond_order] # reorder conditions
+        new_labels[0] = '{}\n'.format('all') + new_labels[0]
+        self.ax.set_xticklabels(xtick_labels + new_labels, rotation=45, ha='right')
+
         # Plot data over animals, conditions
-        pvalues = {}
-        if plot_subjects:
+        if plot_subjects or plot_scatter:
+            # Cache combined data
+            d_plot_all = d_plot
+            d_err_all = d_err
+            cond_plot_all = cond_plot
+
             for i, mouse_id in enumerate(data.keys()):
                 # Get all data
                 d_all, cond_all = get_patch_statistics(data[mouse_id],
@@ -551,67 +595,55 @@ class Plotter:
                 d_err = d_err[idx]
                 cond_plot = cond_plot[idx]
 
-                # Plot statistic
-                x = np.arange(len(cond_plot)) + i*(len(cond_plot) + 1)
-                yerr = np.vstack([np.zeros(len(d_err)), d_err])
-                self.ax.bar(x, 
-                            d_plot[cond_order], 
-                            yerr=yerr[:, cond_order],
-                            color=self.cmap(c))
+                if plot_subjects:
+                    # Plot statistic
+                    x = np.arange(len(cond_plot)) + i*(len(cond_plot) + 1)
+                    yerr = np.vstack([np.zeros(len(d_err)), d_err])
+                    self.ax.bar(x, 
+                                d_plot[cond_order], 
+                                yerr=yerr[:, cond_order],
+                                color=self.cmap(c))
 
-                # Format axis
-                if (i == 0):
-                    # Note: This only works if plt.tight_layout() is called after
-                    # all subplots have finished. Otherwise, it will call plt.draw(),
-                    # which automatically sets tick labels. 
-                    self.ax.set_xticks([]) # clear default ticks
-                    self.ax.set_xticklabels([]) # clear default labels
-                xticks = self.ax.get_xticks()
-                self.ax.set_xticks(list(xticks) + list(x))
-                xtick_labels = [label._text for label in self.ax.get_xticklabels()
-                                if label._text != '']
-                new_labels = [', '.join([str(p) for p in params]) for key, params in cond_params.items()
-                        if key not in exclude_cond]
-                new_labels = [new_labels[i] for i in cond_order] # reorder conditions
-                new_labels[0] = '{}\n'.format(mouse_id) + new_labels[0]
-                self.ax.set_xticklabels(xtick_labels + new_labels)
+                    # Format axis
+                    xticks = self.ax.get_xticks()
+                    self.ax.set_xticks(list(xticks) + list(x))
+                    xtick_labels = [label._text for label in self.ax.get_xticklabels()
+                                    if label._text != '']
+                    new_labels = [', '.join([str(p) for p in params]) for key, params in cond_params.items()
+                            if key not in exclude_cond]
+                    new_labels = [new_labels[i] for i in cond_order] # reorder conditions
+                    new_labels[0] = '{}\n'.format(mouse_id) + new_labels[0]
+                    self.ax.set_xticklabels(xtick_labels + new_labels)
 
-        # Plot combined data
-        # Get consolidated data across animals
-        d_plot, cond_plot = get_patch_statistics(data, 
-                                            ids=cond, 
-                                            method=center, 
-                                            return_all=False)
-        d_err, cond_plot = get_patch_statistics(data, 
-                                            ids=cond, 
-                                            method=center, 
-                                            return_all=False)
-        
-        # Exclude condition data
-        idx = ~np.isin(cond_plot, exclude_cond)
-        d_plot = d_plot[idx]
-        d_err = d_err[idx]
-        cond_plot = cond_plot[idx]
+                if plot_scatter:
+                    # Add NaN to conditions not experienced
+                    if len(d_plot) < len(cond_plot_all):
+                        d_plot_ = np.zeros([len(cond_plot_all)])
+                        d_err_ = np.zeros([len(cond_plot_all)])
+                        for j, cond_ in enumerate(cond_plot_all):
+                            if cond_ not in cond_plot:
+                                d_plot_[j] = np.nan
+                                d_err_[j] = np.nan
+                            else:
+                                idx = np.argwhere(cond_plot == cond_)
+                                d_plot_[j] = d_plot[idx]
+                                d_err_[j] = d_err[idx]
+                        d_plot = d_plot_
+                        d_err = d_err_
 
-        # Plot consolidated data
-        x = np.arange(len(cond_plot)) + plot_subjects*len(data.keys())*(len(cond_plot) + 1)
-        yerr = np.vstack([np.zeros(len(d_err)), d_err])
-        self.ax.bar(x, 
-                    d_plot[cond_order], 
-                    yerr=yerr[:, cond_order],
-                    color=self.cmap(c))
-        if not plot_subjects:
-            self.ax.set_xticks([]) # clear default ticks
-            self.ax.set_xticklabels([]) # clear default labels
-        xticks = self.ax.get_xticks()
-        self.ax.set_xticks(list(xticks) + list(x))
-        xtick_labels = [label._text for label in self.ax.get_xticklabels()
-                        if label._text != '']
-        new_labels = [', '.join([str(p) for p in params]) for key, params in cond_params.items()
-                    if key not in exclude_cond]
-        new_labels = [new_labels[i] for i in cond_order] # reorder conditions
-        new_labels[0] = '{}\n'.format('all') + new_labels[0]
-        self.ax.set_xticklabels(xtick_labels + new_labels, rotation=45, ha='right')
+                    # Plot statistic
+                    x = np.arange(len(cond_plot_all)) + plot_subjects*len(data.keys())*(len(cond_plot_all) + 1)
+                    #x = x.astype(np.float64) + np.linspace(-0.3, 0.3, len(data.keys())+1)[i+1]
+                    x = x.astype(np.float64) + np.random.uniform(0.10, 0.30)*(-1)**random.randrange(2)
+                    #yerr = np.vstack([np.zeros(len(d_err)), d_err])
+                    yerr =  np.vstack([d_err, d_err])
+                    self.ax.errorbar(x, 
+                                     d_plot[cond_order], 
+                                     yerr=yerr[:, cond_order],
+                                     color=self.cmap(0.0),
+                                     capsize=0,
+                                     marker='o',
+                                     linestyle='none')     
 
     def plot_by_condition(self, 
                           data, 
