@@ -497,13 +497,13 @@ class Plotter:
                                data, 
                                cond, 
                                cond_params,
-                               exclude_cond=[],
-                               cond_order=None,
-                               center='median',
-                               err='sem',
+                               include_cond=None,
                                c=0.5,
                                figsize=(15, 15),
                                new_fig=True,
+                               x_offset=0.0,
+                               center='median',
+                               err='sem',
                                plot_subjects=True,
                                plot_scatter=False):
         # Create new figure
@@ -515,16 +515,6 @@ class Plotter:
             data = {'mouse': data}
             cond = {'mouse': cond}
 
-        # Find plot order of conditions
-        if cond_order is None:
-            cond_order = np.arange(len(cond_params) - len(exclude_cond))
-        else:
-            assert len(cond_order) == len(cond_params) - len(exclude_cond)
-            if not isinstance(cond_order, np.ndarray):
-                cond_order = np.array(cond_order)
-            gt = (cond_order[np.newaxis, :] > np.array(exclude_cond)[:, np.newaxis])
-            cond_order -= np.sum(gt, axis=0)
-        
         # Plot combined data
         # Get consolidated data across animals
         d_plot, cond_plot = get_patch_statistics(data, 
@@ -535,15 +525,28 @@ class Plotter:
                                             ids=cond, 
                                             method=center, 
                                             return_all=False)
+
+        # Format included conditions
+        if include_cond is None:
+            include_cond = np.unique(cond_plot)
+        elif not isinstance(include_cond, np.ndarray):
+            include_cond = np.asarray(include_cond)
         
         # Exclude condition data
-        idx = ~np.isin(cond_plot, exclude_cond)
+        idx = np.isin(cond_plot, include_cond)
         d_plot = d_plot[idx]
         d_err = d_err[idx]
         cond_plot = cond_plot[idx]
 
+        # Determine plot order (patch statistics returned sorted by default)
+        idx = np.argwhere(include_cond[np.newaxis, :] == cond_plot[:, np.newaxis])
+        cond_order = np.argsort(idx[:, 1])
+        assert (cond_plot[cond_order] == include_cond).all()
+        
         # Plot consolidated data
-        x = np.arange(len(cond_plot)) + plot_subjects*len(data.keys())*(len(cond_plot) + 1)
+        x = np.arange(len(cond_plot)) \
+            + plot_subjects*len(data.keys())*(len(cond_plot) + 1) \
+            + x_offset
         yerr = np.vstack([np.zeros(len(d_err)), d_err])
         self.ax.bar(x, 
                     d_plot[cond_order], 
@@ -554,13 +557,14 @@ class Plotter:
         self.ax.set_xticks([]) # clear default ticks
         self.ax.set_xticklabels([]) # clear default labels
         xticks = self.ax.get_xticks()
-        self.ax.set_xticks(list(xticks) + list(x))
+        self.ax.set_xticks(list(xticks) + list(x - x_offset))
         xtick_labels = [label._text for label in self.ax.get_xticklabels()
                         if label._text != '']
         new_labels = [', '.join([str(p) for p in params]) for key, params in cond_params.items()
-                    if key not in exclude_cond]
+                      if key in include_cond]
         new_labels = [new_labels[i] for i in cond_order] # reorder conditions
-        new_labels[0] = '{}\n'.format('all') + new_labels[0]
+        if plot_subjects:
+            new_labels[0] = '{}\n'.format('all') + new_labels[0]
         self.ax.set_xticklabels(xtick_labels + new_labels, rotation=45, ha='right')
 
         # Plot data over animals, conditions
@@ -587,17 +591,17 @@ class Plotter:
                                                     return_all=False)
 
                 # Exclude condition data
-                idx = ~np.isin(cond_all, exclude_cond)
+                idx = np.isin(cond_all, include_cond)
                 d_all = d_all[idx]
                 cond_all = cond_all[idx]
-                idx = ~np.isin(cond_plot, exclude_cond)
+                idx = np.isin(cond_plot, include_cond)
                 d_plot = d_plot[idx]
                 d_err = d_err[idx]
                 cond_plot = cond_plot[idx]
 
                 if plot_subjects:
                     # Plot statistic
-                    x = np.arange(len(cond_plot)) + i*(len(cond_plot) + 1)
+                    x = np.arange(len(cond_plot)) + i*(len(cond_plot) + 1) + x_offset
                     yerr = np.vstack([np.zeros(len(d_err)), d_err])
                     self.ax.bar(x, 
                                 d_plot[cond_order], 
@@ -606,11 +610,11 @@ class Plotter:
 
                     # Format axis
                     xticks = self.ax.get_xticks()
-                    self.ax.set_xticks(list(xticks) + list(x))
+                    self.ax.set_xticks(list(xticks) + list(x - x_offset))
                     xtick_labels = [label._text for label in self.ax.get_xticklabels()
                                     if label._text != '']
                     new_labels = [', '.join([str(p) for p in params]) for key, params in cond_params.items()
-                            if key not in exclude_cond]
+                                  if key in include_cond]
                     new_labels = [new_labels[i] for i in cond_order] # reorder conditions
                     new_labels[0] = '{}\n'.format(mouse_id) + new_labels[0]
                     self.ax.set_xticklabels(xtick_labels + new_labels)
@@ -632,7 +636,9 @@ class Plotter:
                         d_err = d_err_
 
                     # Plot statistic
-                    x = np.arange(len(cond_plot_all)) + plot_subjects*len(data.keys())*(len(cond_plot_all) + 1)
+                    x = np.arange(len(cond_plot_all)) \
+                        + plot_subjects*len(data.keys())*(len(cond_plot_all) + 1) \
+                        + x_offset
                     #x = x.astype(np.float64) + np.linspace(-0.3, 0.3, len(data.keys())+1)[i+1]
                     x = x.astype(np.float64) + np.random.uniform(0.10, 0.30)*(-1)**random.randrange(2)
                     #yerr = np.vstack([np.zeros(len(d_err)), d_err])
@@ -643,14 +649,297 @@ class Plotter:
                                      color=self.cmap(0.0),
                                      capsize=0,
                                      marker='o',
-                                     linestyle='none')     
+                                     linestyle='none')
+
+    def swarmplot_by_condition(self,
+                               data, 
+                               cond, 
+                               cond_params,
+                               include_cond=None,
+                               c=0.5,
+                               figsize=(15, 15),
+                               new_fig=True,
+                               x_offset=0.0,
+                               plot_subjects=True,
+                               s=1.0,
+                               r_factor=1.0,
+                               order='ascending',
+                               **kwargs):
+        """s=1.0,
+            r_factor=1.0,
+            order='ascending',"""
+        return self._scatter_by_condition(data, 
+                                          cond, 
+                                          cond_params,
+                                          plot_type='swarm',
+                                          include_cond=include_cond,
+                                          c=c,
+                                          figsize=figsize,
+                                          new_fig=new_fig,
+                                          x_offset=x_offset,
+                                          plot_subjects=plot_subjects,
+                                          s=s,
+                                          r_factor=r_factor,
+                                          order=order,
+                                          **kwargs)
+
+    def boxplot_by_condition(self,
+                             data, 
+                             cond, 
+                             cond_params,
+                             include_cond=None,
+                             c=0.5,
+                             figsize=(15, 15),
+                             new_fig=True,
+                             x_offset=0.0,
+                             plot_subjects=True,
+                             **kwargs):
+        return self._scatter_by_condition(data, 
+                                          cond, 
+                                          cond_params,
+                                          plot_type='box',
+                                          include_cond=include_cond,
+                                          c=c,
+                                          figsize=figsize,
+                                          new_fig=new_fig,
+                                          x_offset=x_offset,
+                                          plot_subjects=plot_subjects,
+                                          **kwargs)
+
+
+    def _scatter_by_condition(self,
+                              data,
+                              cond,
+                              cond_params,
+                              plot_type,
+                              include_cond=None,
+                              c=0.5,
+                              figsize=(15, 15),
+                              new_fig=True,
+                              x_offset=0.0,
+                              plot_subjects=True,
+                              s=1.0,
+                              r_factor=1.0,
+                              order='ascending',
+                              **kwargs):
+
+        # Create new figure
+        if new_fig:
+            self.create_new_figure(figsize=figsize)
+        
+        # Convert to dictionary if needed (e.g. single animal data)
+        if not isinstance(data, dict):
+            data = {'mouse': data}
+            cond = {'mouse': cond}
+        
+        # Plot combined data
+        # Get consolidated data across animals
+        d_plot, cond_plot = get_patch_statistics(data, 
+                                                 ids=cond, 
+                                                 return_all=True)
+
+        # Format included conditions
+        if include_cond is None:
+            include_cond = np.unique(cond_plot)
+        elif not isinstance(include_cond, np.ndarray):
+            include_cond = np.asarray(include_cond)
+        
+        # Exclude condition data
+        idx = np.isin(cond_plot, include_cond)
+        d_plot = d_plot[idx]
+        cond_plot = cond_plot[idx]
+
+        # Determine plot order (patch statistics returned sorted by default)
+        idx = np.argwhere(include_cond[np.newaxis, :] == np.unique(cond_plot)[:, np.newaxis])
+        cond_order = np.argsort(idx[:, 1])
+        assert (np.unique(cond_plot)[cond_order] == include_cond).all()
+
+        # Set swarm-specific variables
+        if plot_type.lower() == 'swarm':
+            # Get limits from dummy plot
+            self.ax.scatter(np.ones(len(d_plot)), d_plot, s=0.0)
+            ylim = self.ax.get_ylim()
+            xlim = [x_offset - 0.5, len(cond_order) + plot_subjects*len(data.keys())*(len(cond_order) + 1) + x_offset + 0.5]
+
+        # Plot consolidated data
+        centers = np.arange(len(include_cond)) \
+                  + plot_subjects*len(data.keys())*(len(include_cond) + 1) \
+                  + x_offset
+        for cond_i, center in zip(include_cond, centers):
+            y = d_plot[cond_plot == cond_i]
+            if plot_type.lower() == 'swarm':
+                x = center*np.ones(y.shape[0])
+                x, y = self._apply_swarm_spacing(x, y,
+                                            s=s,
+                                            r_factor=r_factor,
+                                            order=order,
+                                            xlim=xlim,
+                                            ylim=ylim)
+                self.ax.scatter(x, y, 
+                                color=self.cmap(c),
+                                s=s,
+                                **kwargs)
+            elif plot_type.lower() == 'box':
+                self.ax.boxplot(y,
+                                positions=np.array([center]), 
+                                **kwargs)
+            else:
+                raise ValueError('Unknown scatter type \'{}\'.'.format(plot_type))
+
+        # Format axis
+        self.ax.set_xticks([]) # clear default ticks
+        self.ax.set_xticklabels([]) # clear default labels
+        xticks = self.ax.get_xticks()
+        self.ax.set_xticks(list(xticks) + list(centers - x_offset))
+        xtick_labels = [label._text for label in self.ax.get_xticklabels()
+                        if label._text != '']
+        new_labels = [', '.join([str(p) for p in params]) for key, params in cond_params.items()
+                      if key in include_cond]
+        new_labels = [new_labels[i] for i in cond_order] # reorder conditions
+        if plot_subjects:
+            new_labels[0] = '{}\n'.format('all') + new_labels[0]
+        self.ax.set_xticklabels(xtick_labels + new_labels, rotation=45, ha='right')
+        
+        # Plot data over animals, conditions
+        if plot_subjects:
+            for i, mouse_id in enumerate(data.keys()):
+                # Get all data for animal
+                d_plot, cond_plot = get_patch_statistics(data[mouse_id],
+                                                    ids=cond[mouse_id],
+                                                    return_all=True)
+
+                # Exclude condition data
+                idx = np.isin(cond_plot, include_cond)
+                d_plot = d_plot[idx]
+                cond_plot = cond_plot[idx]
+
+                # Plot consolidated data
+                centers = np.arange(len(include_cond)) + i*(len(include_cond) + 1) + x_offset
+                for cond_i, center in zip(include_cond, centers):
+                    y = d_plot[cond_plot == cond_i]
+                    if y.size > 0:
+                        if plot_type.lower() == 'swarm':
+                            x = center*np.ones(y.shape[0])
+                            x, y = self._apply_swarm_spacing(x, y,
+                                                        s=s,
+                                                        r_factor=r_factor,
+                                                        order=order,
+                                                        xlim=xlim,
+                                                        ylim=ylim)
+                            self.ax.scatter(x, y, 
+                                            color=self.cmap(c),
+                                            s=s,
+                                            **kwargs)
+
+                        elif plot_type.lower() == 'box':
+                            self.ax.boxplot(y, 
+                                            positions=np.array([center]),
+                                            **kwargs)
+                        else:
+                            raise ValueError('Unknown scatter type \'{}\'.'.format(plot_type))
+
+                # Format axis
+                xticks = self.ax.get_xticks()
+                self.ax.set_xticks(list(xticks) + list(centers - x_offset))
+                xtick_labels = [label._text for label in self.ax.get_xticklabels()
+                                if label._text != '']
+                new_labels = [', '.join([str(p) for p in params]) for key, params in cond_params.items()
+                                if key in include_cond]
+                new_labels = [new_labels[j] for j in cond_order] # reorder conditions
+                new_labels[0] = '{}\n'.format(mouse_id) + new_labels[0]
+                self.ax.set_xticklabels(xtick_labels + new_labels)
+        
+        # Set axis limits to ensure swarmplot spacing correct
+        if plot_type.lower() == 'swarm':
+            self.ax.set_xlim(xlim)
+            self.ax.set_ylim(ylim)
+
+    def _apply_swarm_spacing(self, x, y, 
+                             s=1.0, 
+                             r_factor=1.0, 
+                             order='ascending',
+                             xlim=None,
+                             ylim=None):
+        # Get axis limits based on dummy scatter plot if not provided
+        if xlim is None or ylim is None:
+            pts = self.ax.scatter(x, y, s=0.0)
+            if xlim is None:
+                xlim = self.ax.get_xlim()
+            if ylim is None:
+                ylim = self.ax.get_ylim()
+        
+        # Set axis limits to set transform
+        self.ax.set_xlim(xlim)
+        self.ax.set_ylim(ylim)
+
+        # Transform data coordinates to pixel coordinates
+        xy_pix = self.ax.transData.transform(np.vstack([x, y]).T)
+        x, y = xy_pix.T # (x, y) in pixel coordinates
+
+        # Place pixel coordinates in specified order
+        r = r_factor*0.5*(s**0.5) # convert size parameter to bounding box radius
+        sort_idx = np.argsort(y)
+        if order.lower() == 'descending':
+            sort_idx = sort_idx[::-1]
+        elif order.lower() != 'ascending':
+            raise ValueError('Unknown order \'{}\'.'.format(order))
+        x = x[sort_idx]
+        y = y[sort_idx]
+
+        # Next, iterate through points to determine new x-position
+        for i in range(y.shape[0]):
+            #print(i)
+            # Determine previous points that overlap with current position
+            d = ((x[i] - x[:i])**2 + (y[i] - y[:i])**2)**0.5
+            #idx = np.atleast_1d(np.argwhere(d < 2*r).squeeze())
+            idx = np.atleast_1d(np.argwhere(y[i] - y[:i] < 2*r).squeeze())
+            #print(idx)
+            
+            if len(idx) > 0 and np.sum(d < 2*r) > 0:
+                # Find new candidates (x', y) for x-coordinate that place current point
+                # adjacent to previous point by shifting only horizontally. These
+                # satisfy the equation:
+                #    ((x' - a)^2 + (y - b)^2)^0.5 >= 2r
+                # for all previous points (a, b). To estimate new x-coordinate, solve
+                # the equation above for the new coordinate x':
+                #    x' >= (4r^2 - (y - b)^2)^0.5 + a
+                # accounting for both the positive and negative square root. Finally,
+                # see which candidates also satisfy the minimum distance from all other
+                # previously plotted points and take the one with the minimum shift
+                # from the original position.
+                k = 1.01 # scale factor to correct for floating point errors
+                max_iters = 10 # max iterations in loop (k ~ 1.6)
+                for j in range(max_iters):
+                    # Find new candidates
+                    x_new = np.hstack([ k*(4*(r**2) - (y[i] - y[idx]))**0.5 + x[idx],
+                                       -k*(4*(r**2) - (y[i] - y[idx]))**0.5 + x[idx]])
+                    dx = x_new[np.newaxis, :] - x[idx, np.newaxis]
+                    dy = y[np.newaxis, i] - y[idx, np.newaxis]
+                    d = (dx**2 + dy**2)**0.5
+                    idx_new = np.atleast_1d(np.argwhere(np.sum(d < 2*r, axis=0) == 0).squeeze())
+                    
+                    # Break if 1+ candidates found
+                    if idx_new.size > 0:
+                        break
+                    else:
+                        k = 1.05*k
+
+                # Select new x-coordinate as minimal shift from current position
+                x[i] = x_new[idx_new][np.argmin(np.abs(x[i] - x_new[idx_new]))]
+
+        # Transform pixel coordinates back to data coordinates
+        xy_data = self.ax.transData.inverted().transform(np.vstack([x, y]).T)
+        x_data, y_data = xy_data.T
+
+        return x_data, y_data
+
+        
 
     def plot_by_condition(self, 
                           data, 
                           cond, 
                           cond_params,
-                          exclude_cond=[],
-                          cond_order=None,
+                          include_cond=None,
                           center='median',
                           err='sem',
                           c=0.5,
@@ -659,7 +948,7 @@ class Plotter:
                           plot_subjects=True,
                           capsize=None,
                           markersize=None,
-                          linewidth=None):
+                          linewidth=1.0):
         # Create new figure
         if new_fig:
             self.create_new_figure(figsize=figsize)
@@ -669,15 +958,16 @@ class Plotter:
             data = {'mouse': data}
             cond = {'mouse': cond}
 
-        # Find plot order of conditions
-        if cond_order is None:
-            cond_order = np.arange(len(cond_params) - len(exclude_cond))
-        else:
-            assert len(cond_order) == len(cond_params) - len(exclude_cond)
-            if not isinstance(cond_order, np.ndarray):
-                cond_order = np.array(cond_order)
-            gt = (cond_order[np.newaxis, :] > np.array(exclude_cond)[:, np.newaxis])
-            cond_order -= np.sum(gt, axis=0)
+        # Format included conditions
+        if include_cond is None:
+            include_cond = np.unique(cond_plot)
+        elif not isinstance(include_cond, np.ndarray):
+            include_cond = np.asarray(include_cond)
+
+        # Determine plot order (patch statistics returned sorted by default)
+        idx = np.argwhere(include_cond[np.newaxis, :] == cond_plot[:, np.newaxis])
+        cond_order = np.argsort(idx[:, 1])
+        assert (cond_plot[cond_order] == include_cond).all()
         
         # Plot data over animals, conditions
         if plot_subjects:
@@ -698,10 +988,10 @@ class Plotter:
                                                     return_all=False)
 
                 # Exclude condition data
-                idx = ~np.isin(cond_all, exclude_cond)
+                idx = np.isin(cond_all, include_cond)
                 d_all = d_all[idx]
                 cond_all = cond_all[idx]
-                idx = ~np.isin(cond_plot, exclude_cond)
+                idx = np.isin(cond_plot, include_cond)
                 d_plot = d_plot[idx]
                 d_err = d_err[idx]
                 cond_plot = cond_plot[idx]
@@ -728,7 +1018,7 @@ class Plotter:
                                             return_all=False)
 
         # Exclude condition data
-        idx = ~np.isin(cond_plot, exclude_cond)
+        idx = np.isin(cond_plot, include_cond)
         d_plot = d_plot[idx]
         d_err = d_err[idx]
         cond_plot = cond_plot[idx]
@@ -755,9 +1045,21 @@ class Plotter:
         # Set axis labels
         self.ax.set_xticks(x)
         new_labels = [', '.join([str(p) for p in params]) for key, params in cond_params.items()
-                      if key not in exclude_cond]
+                      if key in include_cond]
         new_labels = [new_labels[i] for i in cond_order] # reorder conditions
         self.ax.set_xticklabels(new_labels, rotation=45, ha='right')
+
+    def _format_cond_order(self, cond_order, cond_params, exclude_cond):
+        if cond_order is None:
+            cond_order = np.arange(len(cond_params) - len(exclude_cond))
+        else:
+            assert len(cond_order) == len(cond_params) - len(exclude_cond)
+            if not isinstance(cond_order, np.ndarray):
+                cond_order = np.array(cond_order)
+            gt = (cond_order[np.newaxis, :] > np.array(exclude_cond)[:, np.newaxis])
+            cond_order -= np.sum(gt, axis=0)
+        
+        return cond_order
 
     def save_figure(self, filepath, ext='pdf', dpi=None):
         plt.savefig(filepath, format=ext, dpi=dpi)
