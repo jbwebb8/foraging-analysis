@@ -775,7 +775,7 @@ def find_data(mouse_id, files, ext='.mat', exclude_strs=[]):
                 exclude = True
                 break
         if (f.lower().endswith(ext)
-            and mouse_id in f.lower()
+            and mouse_id.lower() in f.lower()
             and not exclude):
             filelist.append(f)
 
