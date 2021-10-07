@@ -9,7 +9,8 @@ import pickle
 import numpy as np
 from scipy.interpolate import interp1d
 from helper import smooth_waveform_variance, find_threshold, \
-                   cumulative_reward, get_optimal_values, compare_patch_times
+                   cumulative_reward, get_optimal_values, compare_patch_times, \
+                   smooth_waveform_power_ratio
 from util import in_interval, _check_list, dec_to_bin_array, flatten_list
 from ephys import LinearRegression
 
@@ -85,17 +86,17 @@ class Session:
         if names is not None:
             names = _check_list(names)
             for name in names:
-                _ = self.data.pop(name)
+                _ = self.data.pop(name, None)
         else:
             self.data = {}
 
-    def load_vars(self, names):
+    def load_vars(self, names, **kwargs):
         if not isinstance(names, list):
             names = [names]
         for name in names:
             if name in self.var_names:
                 if name not in self.vars.keys():
-                    self.vars[name] = self._load_var(name)
+                    self.vars[name] = self._load_var(name, **kwargs)
             else:
                 raise SyntaxError('Variable name \'%s\' not recognized.' % name)
 
@@ -106,7 +107,7 @@ class Session:
         if names is not None:
             names = _check_list(names)
             for name in names:
-                _ = self.vars.pop(name)
+                _ = self.vars.pop(name, None)
         else:
             self.vars = {}
 
@@ -588,7 +589,11 @@ class TTSession(Session):
         else:
             raise ValueError('Name \'%s\' not recognized.' % var_name)
 
-    def _get_patch_times_from_GPIO(self, fs=None, GPIO_labels=None, alternate=True):
+    def _get_patch_times_from_GPIO(self, 
+                                   fs=None, 
+                                   GPIO_labels=None, 
+                                   alternate=True, 
+                                   return_ids=False):
         # Check requirements
         req_data = ['GPIO', 'fs']
         self._check_attributes(data_names=req_data)
@@ -654,8 +659,15 @@ class TTSession(Session):
         # Drop last patch-interpatch sequence
         t_stop = t_patch[-1, 0]
         t_patch = t_patch[:-1, :]
+        idx_patch = idx_patch[:-1]
 
-        return t_patch, in_patch, t_stop
+        if return_ids:
+            return np.asarray([pins[i] for i in idx_patch]), pins
+        else:
+            return t_patch, in_patch, t_stop
+
+    def get_patch_ids(self, **kwargs):
+        return self._get_patch_times_from_GPIO(return_ids=True, **kwargs)
 
     def _smooth_patch_times(self, t_patch):
         """Applies nose poke sensor smoothing to patch entry/exit."""
@@ -811,16 +823,26 @@ class TTSession(Session):
                 r_0 = self.params['Reward']['r_0']
                 tau = self.params['Reward']['tau']
             else:
-                # Search through state machine
+                # Search through state machine for parameter sets
                 R_0 = np.array([0.0])
                 r_0 = []
                 tau = []
+                pins = []
                 for state, state_params in self.params['StateMachine']['States'].items():
                     if state_params.get('Type', None) == 'Patch':
+                        # Get parameter values
                         V_0 = state_params['Params']['ModelParams']['V0']
                         lambda_0 = state_params['Params']['ModelParams']['lambda0']
                         r_0.append(V_0*lambda_0)
                         tau.append(state_params['Params']['ModelParams']['tau'])
+                        
+                        # Find reward pin associated with patch type
+                        for next_state, next_state_params in state_params['NextState'].items():
+                            if next_state_params.get('ConditionType', None) == 'Reward':
+                                for ns, params in self.params['StateMachine']['States'][next_state]['NextState'].items():
+                                    if self.params['StateMachine']['States'][ns]['Type'] == 'Reward':
+                                        pin = self._get_GPIO_pins(self.params['StateMachine']['States'][ns]['Params']['DispensePin'])
+                                        pins.append(pin)
                 
                 # Convert to 1D arrays
                 if len(r_0) == 0 or len(tau) == 0:
@@ -828,11 +850,13 @@ class TTSession(Session):
                 else:
                     r_0 = np.asarray(r_0)
                     tau = np.asarray(tau)
+                    pins = np.asarray(pins)
 
                 # Find unique parameter sets
                 _, keep_idx = np.unique(np.vstack((r_0, tau)), return_index=True, axis=1)
                 r_0 = r_0[keep_idx]
                 tau = tau[keep_idx]
+                pins = pins[keep_idx]
 
                 # Broadcast other parameters to same array shape
                 assert r_0.shape == tau.shape
@@ -842,14 +866,35 @@ class TTSession(Session):
         except KeyError:
             raise UserWarning('Reward depletion parameters not specified.')
 
-        # Minimum travel time: R_0 / r_0
+        # Compute optimal values
         multipatch = (len(r_0) > 1)
         t_p_opt, r_opt = get_optimal_values(t_t=t_t_min, 
                                             R_0=R_0, 
                                             r_0=r_0, 
                                             tau=tau, 
                                             multipatch=multipatch)
-        
+        t_p_opt = t_p_opt.squeeze()
+        r_opt = r_opt.squeeze()
+
+        if per_patch:
+            # If multiple patch types, assign value to each patch based on type
+            if multipatch:
+                t = np.zeros([self.n_patches])
+                r = np.zeros([self.n_patches])
+                patch_ids, pins = self.get_patch_ids()
+                for i, pin in enumerate(pins):
+                    idx = np.argwhere(patch_ids == pin).flatten()
+                    t[idx] = t_p_opt[i]
+                    r[idx] = r_opt[i]
+                t_p_opt = t
+                r_opt = r
+                t_t_min = t_t_min[0] # undo broadcasting in earlier step
+            
+            # Otherwise, broadcast to number of patches
+            else:
+                t_p_opt = t_p_opt*np.ones([self.n_patches])
+                r_opt = r_opt*np.ones([self.n_patches])
+
         if return_all:
             return r_opt / (t_p_opt + t_t_min), r_opt, t_p_opt, t_t_min
         else:
@@ -893,7 +938,7 @@ class LVSession(Session):
         if filename is not None:
             # Get filename
             self.filename = filename
-            self.f = h5py.File(filename)
+            self.f = h5py.File(filename, 'r')
             self.pupil_filepath = pupil_filepath
 
             # Set global attributes
@@ -948,13 +993,21 @@ class LVSession(Session):
             # Placeholder for clock drift model
             self.drift_model = None
         
-        # Otherwise, assume loading from pickled session data
-        elif sess_filepath is not None:
+        # Load pickled session data
+        if sess_filepath is not None:
             self.load(sess_filepath)
             self.f = None
 
-        else:
+        if filename is None and sess_filepath is None:
             raise SyntaxError('filename or sess_filepath must be provided.')
+
+        # Set default parameters for preprocessing sound waveform to estimate
+        # patch times.
+        self._sound_kwargs = [{'med_filter_size': 30, 
+                               'butter_filter_fc': 10}]
+
+        # Placeholder for list of failed computations.
+        self._failed_vars = []
 
     def _ASCII_to_float(self, s):
         return float([u''.join(chr(c) for c in s)][0])
@@ -998,20 +1051,29 @@ class LVSession(Session):
         elif name == 'wheel_position':
             return self.f['UntitledAngularPosition']['Data'][0, :] / 360 * self.WHEEL_CIRCUMFERENCE # cm
         elif name == 'dt_patch':
-            return self.f['UntitledPatchTime']['Data'][0, :]
+            if 'UntitledPatchTime' in self.f.keys():
+                return self.f['UntitledPatchTime']['Data'][0, :]
+            else:
+                raise BadSession('Patch times not logged.')
         else:
             return self._load_subclass_data(name)
 
     def _load_subclass_data(self, name):
         pass
 
-    def _load_var(self, name):
+    def _load_var(self, name, **kwargs):
+        # Check if computation previously failed to avoid unnecessary
+        # computation time.
+        if name in self._failed_vars:
+            raise BadSession('Variable {} computation failed.'.format(name))
+        
+        # Call specific load function
         if name == 'T':
             return self._get_total_time()
         elif name in ['t_patch', 'in_patch', 't_stop']:
             return self._get_patch_times(name)
         elif name in ['s_var', 'fs_s', 't_s']:
-            return self.preprocess_sound(name)
+            return self.preprocess_sound(name, **kwargs)
         elif name in ['t_motor', 'dt_motor', 'n_motor_rem']:
             return self._get_motor_times(name)
         elif name == 't_lick':
@@ -1034,12 +1096,13 @@ class LVSession(Session):
 
         return self.f['UntitledSound' + chamber_number]['Total_Samples'][0, 0]/self.data['fs']
 
-    def preprocess_sound(self, var_name):
+    def preprocess_sound(self, var_name, **kwargs):
         required_data = ['sound', 'fs']
         self._check_attributes(data_names=required_data)
 
-        fs_s, t_s, s_var_smooth = smooth_waveform_variance(self.data['sound'], 
-                                                           self.data['fs'])
+        fs_s, t_s, s_var_smooth = self._preprocess_sound(self.data['sound'], 
+                                                         self.data['fs'],
+                                                         **kwargs)
         if var_name == 's_var':
             return s_var_smooth
         elif var_name == 'fs_s':
@@ -1049,16 +1112,30 @@ class LVSession(Session):
         else:
             raise ValueError('Name \'%s\' not recognized.' % var_name)
 
+    def _preprocess_sound(self, wf, fs, **kwargs):
+        return smooth_waveform_variance(wf, fs, **kwargs)
+
     def _get_patch_times(self, var_name='t_patch'):
         # Requirements
         required_data = ['dt_patch']
         self._check_attributes(data_names=required_data)
 
-        t_patch, in_patch, t_stop = \
-            self._get_patches_from_sound()
-        dt_patch = np.diff(t_patch, axis=1).flatten()
-
-        if compare_patch_times(dt_patch, self.data['dt_patch']):
+        dt_patch = None
+        for kwargs in self._sound_kwargs:
+            try:
+                self.clear_vars(names=['s_var', 'fs_s', 't_s'])
+                self.load_vars(names=['s_var', 'fs_s'], **kwargs)
+                t_patch, in_patch, t_stop = \
+                    self._get_patches_from_sound()
+                dt_patch = np.diff(t_patch, axis=1).flatten()
+                break
+            except UserWarning: # unsuitable sound preprocessing
+                pass
+        
+        if dt_patch is None:
+            self._failed_vars.append(var_name)
+            raise BadSession('Unable to compute patch durations from sound file.')
+        elif compare_patch_times(dt_patch, self.data['dt_patch']):
             if var_name == 't_patch':
                 return t_patch
             elif var_name == 'in_patch':
@@ -1068,7 +1145,7 @@ class LVSession(Session):
             else:
                 raise ValueError('Name \'%s\' not recognized.' % var_name)
         else:
-            raise UserWarning('Patch durations from sound and log file do not match.')
+            raise BadSession('Patch durations from sound and log file do not match.')
 
     def _get_patches_from_sound(self, auto_thresh=True, init_thresh=5.0e-9):
         required_data = ['dt_patch']
@@ -1090,6 +1167,7 @@ class LVSession(Session):
         t_patch, t_stop = self._get_patch_times_from_signal(in_patch, fs_s)
         dt_patch = np.diff(t_patch, axis=1).flatten()
         
+        # TODO: iterate through both threshold and parameters for smoothing function
         # Check for agreement with logged patch durations
         if not compare_patch_times(dt_patch, self.data['dt_patch']):
             #print('Initial threshold failed. Trying range of values...')
@@ -1104,11 +1182,13 @@ class LVSession(Session):
                     if compare_patch_times(dt_patch, self.data['dt_patch']):
                         #print('Successful threshold found: %.2e' % thresh)
                         break
-                except IndexError: # empty array handling
+                except (BadSession, IndexError): # empty array handling
                     pass
 
         if not compare_patch_times(dt_patch, self.data['dt_patch']):
             raise UserWarning('Unable to determine patch times from sound.')
+        elif len(dt_patch) == 0:
+            raise BadSession('No patches detected on signal or in logged data.')
                 
         return t_patch, in_patch, t_stop
 
@@ -1376,7 +1456,7 @@ class LVSession(Session):
         pickle.dump(d, f)
         f.close()
 
-    def load(self, filepath, load_keys=None, ignore_keys=[]):
+    def load(self, filepath, load_keys=None, ignore_keys=[], overwrite=True):
         """
         Loads serialized dictionary of class instance.
         """
@@ -1385,7 +1465,8 @@ class LVSession(Session):
         if load_keys is None:
             load_keys = d.keys()
         for k, v in d.items():
-            if k in load_keys and not k in ignore_keys:
+            if ((k in load_keys and not k in ignore_keys) and
+                (k not in self.__dict__.keys() or (k in self.__dict__.keys() and overwrite))):
                 self.__dict__[k] = v # avoids overwriting h5py.File
         f.close()
 
@@ -1617,3 +1698,141 @@ class TrialSession(Session):
                 self._ASCII_to_float(struct[s + 'VThresholdms'])
             self.settings['run_config']['end_patch_speed'] = \
                 self._ASCII_to_bool(struct[s + 'Endpatchspeed'])
+
+
+class PoissonSession(LVSession):
+
+    REWARD_VOLUME = 2.0 # uL
+
+    def __init__(self, *,
+                 filename=None,
+                 sess_filepath=None,
+                 pupil_filepath=None):
+        # Initialize Session
+        super().__init__(filename=filename,
+                         sess_filepath=sess_filepath,
+                         pupil_filepath=pupil_filepath)
+
+        # Set class instance attributes
+        self.data_names += ['reward']
+        if filename is not None:
+            struct = self.f['Settings']['Property']
+            s = 'SoundConfigurationRunConfig'
+            self.settings['run_config'] = {}
+            self.settings['run_config']['session_duration'] = \
+                self._ASCII_to_float(struct[s + 'SessionTimemin'])
+            self.settings['run_config']['noise_level_high'] = \
+                self._ASCII_to_float(struct[s + 'NoiseLevelHidBSPL'])
+            self.settings['run_config']['noise_level_low'] = \
+                self._ASCII_to_float(struct[s + 'NoiseLevelLodBSPL'])
+            self.settings['run_config']['target_level'] = \
+                self._ASCII_to_float(struct[s + 'TargetLevelHidBorDP'])
+            self.settings['run_config']['d_interpatch'] = \
+                self._ASCII_to_float(struct[s + 'InterPatchDistcm'])
+            self.settings['run_config']['d_patch'] = \
+                self._ASCII_to_float(struct[s + 'PatchLengthcm'])
+            self.settings['run_config']['task_type'] = \
+                self._ASCII_to_string(struct[s + 'TaskType'])
+            self.settings['run_config']['teleport'] = \
+                self._ASCII_to_bool(struct[s + 'InPatchTeleport'])
+            self.settings['run_config']['teleport_length'] = \
+                self._ASCII_to_float(struct[s + 'TeleToPatchEndcm'])
+            self.settings['run_config']['lambda0'] = \
+                self._ASCII_to_float(struct[s + 'Lambda'])
+            self.settings['run_config']['V0'] = \
+                self._ASCII_to_float(struct[s + 'DripSize'])
+            self.settings['run_config']['tau'] = \
+                self._ASCII_to_float(struct[s + 'DecayConstant'])
+            #self.settings['run_config']['r_low'] = \
+            #    self._ASCII_to_float(struct[s + 'ThresholduL'])
+            self.settings['run_config']['end_target_trial'] = \
+                self._ASCII_to_bool(struct[s + 'Endtargettrial'])
+            self.settings['run_config']['v_leave'] = \
+                self._ASCII_to_float(struct[s + 'VThresholdms']) * 100 # cm/s
+            self.settings['run_config']['end_patch_speed'] = \
+                self._ASCII_to_bool(struct[s + 'Endpatchspeed'])
+    
+        # Set default parameters for preprocessing sound waveform to estimate
+        # patch times.
+        self._sound_kwargs =  [{'med_filter_size': None,
+                                'butter_filter_fc': fc}
+                               for fc in [1.0, 0.5, 0.25, 0.1, 0.05]]
+        # Median filter computationally expensive and doesn't seem to improve fit.
+        #self._sound_kwargs += [{'med_filter_size': t,
+        #                        'med_filter_unit': 'time',
+        #                        'butter_filter_fc': None}
+        #                        for t in [0.5, 1.0, 2.0, 4.0, 8.0]]
+        #
+    def _load_subclass_data(self, name):
+        if name == 'reward':
+            self._check_attributes(var_names=['t_motor', 'n_motor_rem'])
+            n_motor = len(self.vars['t_motor']) + self.vars['n_motor_rem']
+            return self.REWARD_VOLUME*np.ones([n_motor])
+    
+    # Overwrite superclass method to account for sound attentuation
+    # of pink noise in between patches. Leave output as 's_var'.
+    def _preprocess_sound(self, wf, fs, **kwargs):
+        return smooth_waveform_power_ratio(wf, fs, **kwargs)
+
+    def _get_max_harvest_rate(self, per_patch=True, return_all=False):
+        # Requirements
+        required_vars = ['t_patch', 't_stop']
+        self._check_attributes(var_names=required_vars)
+
+        # Grab session settings
+        R_0 = 0.0
+        r_0 = self.settings['run_config']['lambda0']*self.settings['run_config']['V0']
+        tau = self.settings['run_config']['tau']
+
+        # Calculate cumulative reward
+        dt_patch = np.diff(self.vars['t_patch'], axis=1)
+        r_patch_max = cumulative_reward(dt_patch, R_0, r_0, tau)
+
+        if per_patch:
+            # Divide reward per patch by segment time (patch + next interpatch)
+            hr_patch_max = r_patch_max / self._get_segment_durations()
+            if return_all:
+                return hr_patch_max, r_patch_max, self._get_segment_durations()
+            else:
+                return hr_patch_max
+
+        else:
+            # Return total cumulative reward over time
+            hr_max = np.sum(r_patch_max) / self.vars['t_stop']
+            if return_all:
+                return hr_max, np.sum(r_patch_max), self.vars['t_stop']
+            else:
+                return hr_max
+
+    def _get_optimal_harvest_rate(self, per_patch=True, return_all=False):
+        # Requirements
+        required_data = ['wheel_speed']
+        self._check_attributes(data_names=required_data)
+
+        # Calculate minimum feasible travel time
+        v_thresh = 2.0 # cm/s 
+        d_interpatch = self.settings['run_config']['d_interpatch']
+        v_run = self.data['wheel_speed']
+        v_run = np.median(v_run[v_run > v_thresh])
+        t_t = d_interpatch / v_run
+
+        # Grab session settings
+        R_0 = 0.0
+        r_0 = self.settings['run_config']['lambda0']*self.settings['run_config']['V0']
+        tau = self.settings['run_config']['tau']
+
+        # Minimum travel time: R_0 / r_0
+        t_p_opt, r_opt = get_optimal_values(t_t=t_t, R_0=R_0, r_0=r_0, tau=tau)
+        
+        if return_all:
+            return r_opt / (t_p_opt + t_t), r_opt, t_p_opt, t_t
+        else:
+            return r_opt / (t_p_opt + t_t)
+    
+    @property
+    def d_interpatch(self):
+        return self.settings['run_config']['d_interpatch']
+    
+    @property
+    def d_patch(self):
+        return self.settings['run_config']['d_patch']
