@@ -2229,12 +2229,13 @@ class Model:
 class LinearRegression(Model):
     PARAM_NAMES = ['w']
 
-    def __init__(self):
+    def __init__(self, use_bias=True):
         super().__init__()
         self._name = 'linear-regression'
 
         # Set parameters
         self._w = None
+        self.use_bias = use_bias
 
     def _params(self):
         return {'w': self._w}
@@ -2250,12 +2251,14 @@ class LinearRegression(Model):
 
         # Fit weights using least-squares regression:
         # w = (X^T X )^-1 X^T y
-        X = np.hstack([X, np.ones([N, 1])]) # add bias term
+        if self.use_bias:
+            X = np.hstack([X, np.ones([N, 1])]) # add bias term
         self._w = np.linalg.inv(X.T.dot(X)).dot(X.T.dot(y))
 
     def _predict(self, X):
         N = X.shape[0]
-        X = np.hstack([X, np.ones([N, 1])]) # add bias term
+        if self.use_bias:
+            X = np.hstack([X, np.ones([N, 1])]) # add bias term
         return X.dot(self._w)
 
     def _goodness_of_fit(self, X, y, method='r_squared'):
