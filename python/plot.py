@@ -22,15 +22,18 @@ class Plotter:
         # Initial figure
         self.fig = None
 
+    def update_rcparams(self, rcparams):
+        matplotlib.rcParams.update(rcparams)
+
     def set_cmap(self, name):
         self.cmap = plt.get_cmap(name)
 
-    def create_new_figure(self, figsize=(15, 15), rows=1, cols=1):
+    def create_new_figure(self, figsize=(15, 15), rows=1, cols=1, **kwargs):
         # Clear old figure
         plt.close('all')
         
         # Create figure and specified axes
-        self.fig, self.axes = plt.subplots(rows, cols, figsize=figsize)
+        self.fig, self.axes = plt.subplots(rows, cols, figsize=figsize, **kwargs)
 
         # Set current axis to first if multiple axes
         if (rows == 1) and (cols == 1):
@@ -72,8 +75,6 @@ class Plotter:
 
         for ax_ in axes_:
             ax_.set_xscale(scale)
-
-    
 
     def plot_learning_curve(self,
                             days,
@@ -531,6 +532,7 @@ class Plotter:
             include_cond = np.unique(cond_plot)
         elif not isinstance(include_cond, np.ndarray):
             include_cond = np.asarray(include_cond)
+        include_cond = include_cond[np.isin(include_cond, np.unique(cond_plot))]
         
         # Exclude condition data
         idx = np.isin(cond_plot, include_cond)
@@ -728,6 +730,8 @@ class Plotter:
                               r_factor=1.0,
                               order='ascending',
                               max_pts=None,
+                              xlim=None,
+                              ylim=None,
                               **kwargs):
 
         # Create new figure
@@ -759,18 +763,26 @@ class Plotter:
         # Determine plot order (patch statistics returned sorted by default)
         idx = np.argwhere(include_cond[np.newaxis, :] == np.unique(cond_plot)[:, np.newaxis])
         cond_order = np.argsort(idx[:, 1])
-        assert (np.unique(cond_plot)[cond_order] == include_cond).all()
+        i = 0
+        for cond_i in np.unique(cond_plot)[cond_order]:
+            while cond_i != include_cond[i]:
+                i += 1
+                if i == len(include_cond):
+                    raise SyntaxError('Condition order not compatible with included conditions.')
+        include_cond = np.unique(cond_plot)[cond_order]
 
         # Set swarm-specific variables
-        if plot_type.lower() == 'swarm':
-            # Get limits from dummy plot
-            self.ax.scatter(np.ones(len(d_plot)), d_plot, s=0.0)
-            ylim = self.ax.get_ylim()
-            if x_centers is not None:
-                xlim = [x_centers.min() + x_offset - 0.5, 
-                        x_centers.max() + x_centers.max()*plot_subjects*len(data.keys())*(len(include_cond) + 1) + x_offset + 0.5]
-            else:
-                xlim = [x_offset - 0.5, len(cond_order) + plot_subjects*len(data.keys())*(len(cond_order) + 1) + x_offset + 0.5]
+        if plot_type.lower() == 'swarm' and (xlim is None or ylim is None):
+            if ylim is None:
+                # Get limits from dummy plot
+                self.ax.scatter(np.ones(len(d_plot)), d_plot, s=0.0)
+                ylim = self.ax.get_ylim()
+            if xlim is None:
+                if x_centers is not None:
+                    xlim = [x_centers.min() + x_offset - 0.5, 
+                            x_centers.max() + x_centers.max()*plot_subjects*len(data.keys())*(len(include_cond) + 1) + x_offset + 0.5]
+                else:
+                    xlim = [x_offset - 0.5, len(include_cond) + plot_subjects*len(data.keys())*(len(cond_order) + 1) + x_offset + 0.5]
         
         # Get centers for each category
         if x_centers is None:
@@ -816,17 +828,12 @@ class Plotter:
         # Format axis
         self.ax.set_xticks([]) # clear default ticks
         self.ax.set_xticklabels([]) # clear default labels
-        #xticks = self.ax.get_xticks()
-        #self.ax.set_xticks(list(centers - x_offset))
-        # xtick_labels = [label._text for label in self.ax.get_xticklabels()
-        #                 if label._text != '']
-        new_labels = [', '.join([str(p) for p in params]) for key, params in cond_params.items()
-                      if key in include_cond]
-        new_labels = [new_labels[i] for i in cond_order] # reorder conditions
+        new_labels = [', '.join([str(p) for p in cond_params[key]]) for key in include_cond]
         if plot_subjects:
-            new_labels[0] = '{}\n'.format('all') + new_labels[0]
-        #self.ax.set_xticklabels(new_labels, rotation=45, ha='right')
-        #print(xtick_labels, new_labels)
+            if len(new_labels[0]) > 0:
+                new_labels[0] = '{}\n'.format('all') + new_labels[0]
+            else:
+                new_labels[0] = 'all'
         xticks_all = list(centers - x_offset)
         xlabels_all = new_labels
         
@@ -880,15 +887,11 @@ class Plotter:
                             raise ValueError('Unknown scatter type \'{}\'.'.format(plot_type))
 
                 # Format axis
-                #xticks = self.ax.get_xticks()
-                #self.ax.set_xticks(list(xticks) + list(centers - x_offset))
-                #xtick_labels = [label._text for label in self.ax.get_xticklabels()
-                #                if label._text != '']
-                new_labels = [', '.join([str(p) for p in params]) for key, params in cond_params.items()
-                                if key in include_cond]
-                new_labels = [new_labels[j] for j in cond_order] # reorder conditions
-                new_labels[0] = '{}\n'.format(mouse_id) + new_labels[0]
-                #self.ax.set_xticklabels(xtick_labels + new_labels)
+                new_labels = [', '.join([str(p) for p in cond_params[key]]) for key in include_cond]
+                if len(new_labels[0]) > 0:
+                    new_labels[0] = '{}\n'.format(mouse_id) + new_labels[0]
+                else:
+                    new_labels[0] = mouse_id
                 xticks_all += list(centers - x_offset)
                 xlabels_all += new_labels
         
