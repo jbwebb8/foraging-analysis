@@ -148,7 +148,7 @@ def get_exit_stats(sess, per_patch=True):
 
     # Get timestamps associated with lick decisions and rewards
     t_decision = get_lick_decisions(sess)
-    t_reward = sess.vars['t_motor']
+    t_reward = sess.get_motor_times()
 
     # Get timestamps associated with patch entry/exit
     t_patch = sess.get_patch_times()
