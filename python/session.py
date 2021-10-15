@@ -38,6 +38,9 @@ class Session:
         self.data = {}
         self.vars = {}
 
+        # Set condition ID
+        self.condition = None
+
     @property
     def n_patches(self):
         """
@@ -206,12 +209,17 @@ class Session:
 
         return np.squeeze(np.diff(t_interpatch, axis=1))
 
-    def get_motor_times(self, var_name='t_motor'):
+    def get_motor_times(self, var_name='t_motor', per_patch=False, relative=False):
         # Requirements
         req_vars = [var_name]
         self._check_attributes(var_names=req_vars)
 
-        return self.vars[var_name]
+        if per_patch:
+            if var_name != 't_motor':
+                raise ValueError('Per patch times do not exist for {}.'.format(var_name))
+            return self._get_event_times_per_patch(var_name=var_name, relative=relative)
+        else:
+            return self.vars[var_name]
     
     def _get_motor_times(self, var_name='t_motor'):
         # Requirements
@@ -251,6 +259,40 @@ class Session:
 
         else:
             raise ValueError('Name \'%s\' not recognized.' % var_name)
+    
+    def _get_event_times_per_patch(self, var_name, relative=False, return_index=False, pad=0.5):
+        """
+        Returns list of event times for each patch, 
+        such as motor or lick events.
+        """
+        # Requirements
+        req_vars = ['t_patch', var_name]
+        self._check_attributes(var_names=req_vars)
+
+        # Find patches in which events occurred
+        _, idx_patch = in_interval(self.vars[var_name],
+                                   self.vars['t_patch'][:, 0]-pad,
+                                   self.vars['t_patch'][:, 1]+pad,
+                                   query='event_interval')
+        n_patch = in_interval(self.vars[var_name],
+                              self.vars['t_patch'][:, 0]-pad,
+                              self.vars['t_patch'][:, 1]+pad,
+                              query='event')
+        if var_name == 't_motor' and (n_patch > 1).any():
+            raise UserWarning('Motor times cannot be uniquely assigned'
+                              ' to individual patches.')
+        
+        # Create list of event times
+        t_event = []
+        for i in range(self.n_patches):
+            t_event.append(self.vars[var_name][idx_patch == i] 
+                           - int(relative)*self.vars['t_patch'][i, 0])
+        
+        # Return results
+        if return_index:
+            return t_event, idx_patch
+        else:
+            return t_event
 
     def _find_threshold_crossings(self, y, thresh):
         # Find where signal > thresh
@@ -267,12 +309,15 @@ class Session:
 
         return is_on, idx_on_start, idx_on_end
 
-    def get_lick_times(self):
+    def get_lick_times(self, per_patch=False, relative=False):
         # Requirements
         req_vars = ['t_lick']
         self._check_attributes(var_names=req_vars)
 
-        return self.vars['t_lick']
+        if per_patch:
+            return self._get_event_times_per_patch('t_lick', relative=relative, pad=0.5)
+        else:
+            return self.vars['t_lick']
     
     def _get_lick_times(self):
         # Requirements
@@ -341,19 +386,7 @@ class Session:
             #r_motor = lambda dt: m*dt - m*np.max(self.vars['dt_motor']) + np.max(r_log)
 
             # Find patches in which rewards given
-            pad = 0.5 # padding in seconds
-            _, idx_patch = in_interval(self.vars['t_motor'],
-                                       self.vars['t_patch'][:, 0]-pad,
-                                       self.vars['t_patch'][:, 1]+pad,
-                                       query='event_interval')
-            n_patch = in_interval(self.vars['t_motor'],
-                                  self.vars['t_patch'][:, 0]-pad,
-                                  self.vars['t_patch'][:, 1]+pad,
-                                  query='event')
-            if (n_patch > 1).any():
-                raise UserWarning('Motor times cannot be uniquely assigned'
-                                  ' to individual patches.')
-
+            _, idx_patch = self._get_event_times_per_patch('t_motor', return_index=True)
 
             # Calculate observed reward per patch
             r_patch_obs = np.zeros(self.vars['t_patch'].shape[0])
@@ -888,12 +921,14 @@ class TTSession(Session):
                     r[idx] = r_opt[i]
                 t_p_opt = t
                 r_opt = r
-                t_t_min = t_t_min[0] # undo broadcasting in earlier step
             
             # Otherwise, broadcast to number of patches
             else:
                 t_p_opt = t_p_opt*np.ones([self.n_patches])
                 r_opt = r_opt*np.ones([self.n_patches])
+
+        if multipatch:
+            t_t_min = t_t_min[0] # undo broadcasting in earlier step
 
         if return_all:
             return r_opt / (t_p_opt + t_t_min), r_opt, t_p_opt, t_t_min
