@@ -1488,6 +1488,7 @@ class GPFA(LatentModel):
         
         return tau_max, _gpfa_update_K(sigma_f, sigma_n, tau_max)
 
+    @staticmethod
     def _neg_logE_XY(log_tau, sigma_f, sigma_n, E_xiTxi, return_grad=False):
         # Inverse log transformation
         tau_i = np.exp(log_tau)
