@@ -926,6 +926,11 @@ def _full_process_LL(t_k, t_bin, T, lam, tau, history):
     
     # Calculate MLE at each time point
     for i, t in enumerate(t_bin[1:]):
+        # Return negative infinity if estimated Poisson rate is zero.
+        if lam[i] == 0.0:
+            logp[i] = -np.inf
+            continue
+
         # Calculate Lam_n for given tau
         lam_0 = lam[i]*np.exp(t/tau[i])
         Lam_n_ = Lam_n(tau[i], lam_0)
@@ -998,6 +1003,11 @@ def _hidden_process_LL(t_k, t_bin, T, lam, tau, history, L, epsilon=0.1):
     
     # Calculate log-likelihood at each time point
     for i, t in enumerate(t_bin[1:]):
+        # Return negative infinity if estimated Poisson rate is zero.
+        if lam[i] == 0.0:
+            logp[i] = -np.inf
+            continue
+
         # Calculate initial lambda for given tau, t
         lam_0 = lam[i]*np.exp(t/tau[i])
 
