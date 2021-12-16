@@ -833,7 +833,7 @@ def _hidden_process_MLE(t_k, t_bin, T, history, L):
                                    /(tau_MLE[i]*(m - (m-1)*np.exp(-T/tau_MLE[i]) - np.exp(-t/tau_MLE[i])))
                                  ) 
                 else:
-                    lam_MLE[i] = K/((m-1)*T + t)
+                    lam_MLE[i] = L*K/((m-1)*T + t)
             
             # Otherwise, must compute sum of exponential terms.
             else:
@@ -843,15 +843,20 @@ def _hidden_process_MLE(t_k, t_bin, T, history, L):
                                   /(np.sum(T*np.exp(-T/tau)) + t*np.exp(-t/tau))
                                   - L*K
                                 )
-                tau_init = 0.1
+                a = 0.1
+                b_range = np.geomspace(0.5, 1e6, 50)
 
                 # Find MLE of tau
+                success = False
                 if K > 0: # avoid trivial equation
-                    try:
-                        tau_MLE[i] = brentq(f, tau_init, 1e6)
-                    except ValueError:
-                        tau_MLE[i] = math.inf
-                else:
+                    for b in b_range:
+                        try:
+                            tau_MLE[i] = brentq(f, a, b)
+                            success = True
+                            break
+                        except ValueError:
+                            continue
+                if not success:
                     tau_MLE[i] = math.inf
 
                 # Find corresponding MLE of lambda
@@ -860,7 +865,7 @@ def _hidden_process_MLE(t_k, t_bin, T, history, L):
                                    /(tau_MLE[i]*(m - np.sum(np.exp(-T/tau_MLE[i])) - np.exp(-t/tau_MLE[i])))
                                  ) 
                 else:
-                    lam_MLE[i] = K/(np.sum(T) + t)
+                    lam_MLE[i] = L*K/(np.sum(T) + t)
         
     return (lam_MLE, tau_MLE)
 
