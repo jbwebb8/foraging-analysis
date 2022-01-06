@@ -9,19 +9,22 @@ import util
 
 ### Waveform analysis ###
 def med_filt(x, n=3, ignore_nan=True):
+    # Determine handling of nan values
     if ignore_nan:
         med_func = np.nanmedian
     else:
         med_func = np.median
 
+    # Group columns to which to apply median.
     X = np.zeros([n, len(x)])
     for i in range(n):
-        X[i] = np.roll(x, -n//2 + i)
+        X[i] = np.roll(x, -(n//2) + i)
     
+    # Find median in each column and correct end effects.
     x_filt = med_func(X, axis=0)
     for i in range(n//2):
-        x_filt[i] = med_func(X[(n//2 - i):, i])
-        x_filt[-(i+1)] = med_func(X[:(n//2 + i), -(i+1)])
+        x_filt[i] = med_func(X[:(n//2 + i + 1), i])
+        x_filt[-(i+1)] = med_func(X[(n//2 - i):, -(i+1)])
    
     return x_filt
 
