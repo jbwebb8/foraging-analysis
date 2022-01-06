@@ -14,6 +14,13 @@ warnings.filterwarnings('default',
                         'Patch numbers must be zero-indexed.',
                         category=SyntaxWarning,
                         module='models')
+warnings.filterwarnings('default',
+                        'Environment failed to fit properly. Using '
+                        'experimental values for (tau|t_t) instead.',
+                        category=RuntimeWarning,
+                        module='models')
+
+                        
 
 # ForagingModel
 # --HeuristicModel
@@ -472,9 +479,14 @@ class ForagingModel:
 
         return t + dt, F0(t, N)
 
-    def get_expected_wait_time(self, N, t=0.0):
+    def get_expected_wait_time(self, N, t=0.0, N0=0):
+        # Check validity of inputs.
+        if N0 > N:
+            raise ValueError('Number of unobserved events must not exceed'
+                             ' observation threshold.')
+
         # Find expected time to next reward
-        tN, F0 = self.get_expected_reward_time(N, t)
+        tN, F0 = self.get_expected_reward_time(N-N0, t)
         dt = tN - t
 
         # Limit to estimated maximum wait time
@@ -486,7 +498,12 @@ class ForagingModel:
 
         return t + dt
 
-    def add_expected_reward_times(self, N, t, T_max, max_iters=50): 
+    def add_expected_reward_times(self, N, t, T_max, N0=0, max_iters=50):
+        # Check validity of inputs.
+        if N0 > N:
+            raise ValueError('Number of unobserved events must not exceed'
+                             ' observation threshold.')
+        
         # Determine expected waiting times for next rewards
         i = 0 # number of iterations
         t_new = [] # list of new reward times
@@ -498,7 +515,12 @@ class ForagingModel:
             # numbers that are multiples of N from the same start time, it is
             # more numerically stable, since the intermediate values in the
             # computation scale much more quickly with N than t.
-            t, F0 = self.get_expected_reward_time(N, t)
+            if i == 0:
+                # If first reward time, incorporate unobserved events.
+                t, F0 = self.get_expected_reward_time(N-N0, t)
+            else:
+                # Otherwise, find time to N events.
+                t, F0 = self.get_expected_reward_time(N, t)
             t_new.append(t)
             keep.append(rng.random() < F0)
             i += 1
@@ -515,6 +537,22 @@ class ForagingModel:
         t_new = t_new[np.array(keep)]
 
         return t_new
+
+    def estimate_unobserved_events(self, N, t, s):
+        # Get model functions (for shorthand)
+        lam = self._patch_model.lam
+        Lam = self._patch_model.Lam
+
+        # Compute expectation of number of unobserved events:
+        #   E[n] = sum(n*p(n))/sum(p(n))
+        # where summation is for n = 0,...,N-1
+        p = lambda s, t, n: np.exp(-Lam(t,s))*(Lam(t,s)**n)/factorial(n)
+        E_n = np.sum(np.arange(N)*p(s, t, np.arange(N)))/np.sum(p(s, t, np.arange(N)))
+
+        # Round to nearest integer (except down if > N-1).
+        E_n = min(round(E_n), N-1)
+
+        return E_n
 
     def _build_opt_inputs(self, 
                           param_names,
@@ -663,12 +701,18 @@ class RewardTimeModel(HeuristicModel):
                 self.set_environment(env_id)
                 N = int(self.REWARD_VOLUME/self._V0)
 
+                # Estimate number of unobserved drips at leaving time.
+                N0 = self.estimate_unobserved_events(N, t_start, t_p-t_start)
+
                 # Determine expected waiting times for next rewards
                 t = t_start
                 iters = 0
                 while (t - t_start) < dt:
                     t_start = t
-                    t = self.get_expected_wait_time(N, t_start)
+                    if iters == 0:
+                        t = self.get_expected_wait_time(N-N0, t_start)
+                    else:
+                        t = self.get_expected_wait_time(N, t_start)
                     iters += 1
                     if iters > 50:
                         raise RuntimeError('No convergence.')
@@ -704,7 +748,7 @@ class RewardNumberModel(RewardTimeModel):
 
         return n_rewards
 
-    def _predict(self, *, t_motor_patch=None, env_ids=None, method='mean'):
+    def _predict(self, *, t_motor_patch=None, dt_patch=None, env_ids=None, method='mean'):
         # Get parameters
         dt = self._params[self._active_key]['dt_' + method]
         std = self._params[self._active_key]['dt_std']
@@ -713,19 +757,23 @@ class RewardNumberModel(RewardTimeModel):
         # Get test data
         if t_motor_patch is None:
             t_motor_patch = self.test_data['t_motor_patch']
+        if dt_patch is None:
+            dt_patch = self.test_data['dt_patch']
         if env_ids is None:
             env_ids = self.test_data['env_id']
 
         # Unravel session data
-        t_motor_patch, (env_ids,) = self.unravel(t_motor_patch, env_ids)
-        assert len(t_motor_patch) == len(env_ids)
+        t_motor_patch, (dt_patch, env_ids,) = self.unravel(t_motor_patch, 
+                                                           dt_patch, 
+                                                           env_ids)
+        assert len(t_motor_patch) == len(dt_patch) == len(env_ids)
 
         # Set random number generator with seed for reproducibility.
         rng = np.random.default_rng(self.RANDOM_SEED)
 
         # Compute inter-reward intervals
         t_hat = np.ones([len(t_motor_patch)])*np.nan
-        for i, (t_m, env_id) in enumerate(zip(t_motor_patch, env_ids)):
+        for i, (t_m, t_p, env_id) in enumerate(zip(t_motor_patch, dt_patch, env_ids)):
             if np.isnan(t_m).any():
                 continue
 
@@ -749,7 +797,8 @@ class RewardNumberModel(RewardTimeModel):
 
                 # Find expected time of reward n_i
                 N = (n_i - len(t_m))*int(self.REWARD_VOLUME/self._V0)
-                t_hat[i] = self.get_expected_wait_time(N, t_start)
+                N0 = self.estimate_unobserved_events(N, t_start, t_p-t_start)
+                t_hat[i] = self.get_expected_wait_time(N-N0, t_start)
 
             # Otherwise, take time of nth reward
             else:
@@ -993,7 +1042,13 @@ class FittedMVTModel(MVTModel):
         self._params[self._active_key]['track_exp'] = params['track']['value'][idx]
                         
         # Optimize x as minimizing MSE of residence times
-        res = opt.minimize(self.mvt_error, x_init, args=(Y, params))
+        for gtol in [1e-5, 1e-4, 1e-3]:
+            res = opt.minimize(self.mvt_error, x_init, 
+                               args=(Y, params), 
+                               method='BFGS',
+                               options={'gtol': gtol})
+            if res.success:
+                break
 
         # Save optimization results
         self._params[self._active_key]['names'] = param_names
@@ -1037,6 +1092,8 @@ class FittedMVTModel(MVTModel):
             title = '\n'.join(['{}={}'.format(var, self.params['{}_exp'.format(var)]) 
                                for var in param_names])
             ax.set_title('experimental params:\n' + title)
+
+        return res, x_init, Y, params
 
     @staticmethod
     def mvt_error(x, Y, params, broadcast_shape=False):
@@ -1096,12 +1153,24 @@ class FittedMVTModel(MVTModel):
             r_0 = self._V0*self._lambda0
             if 'tau' in self._params[self._active_key]['names']:
                 idx = (self._params[self._active_key]['tau_exp'] == self._tau)
-                tau = self._params[self._active_key]['tau_fit'][idx]
+                if not np.isnan(self._params[self._active_key]['tau_fit']).all():
+                    tau = self._params[self._active_key]['tau_fit'][idx]
+                else:
+                    warnings.warn('Environment failed to fit properly. Using '
+                                  'experimental values for tau instead.',
+                                  category=RuntimeWarning)
+                    tau = self._tau
             else:
                 tau = self._tau
             idx = (self._params[self._active_key]['track_exp'] == self._track)
             if 't_t' in self._params[self._active_key]['names']:
-                t_t = self._params[self._active_key]['t_t_fit'][idx]
+                if not np.isnan(self._params[self._active_key]['t_t_fit']).all():
+                    t_t = self._params[self._active_key]['t_t_fit'][idx]
+                else:
+                    warnings.warn('Environment failed to fit properly. Using '
+                                  'experimental values for t_t instead.',
+                                  category=RuntimeWarning)
+                    t_t = self._params[self._active_key]['t_t_exp'][idx]
             else:
                 t_t = self._params[self._active_key]['t_t_exp'][idx]
             
@@ -1189,14 +1258,18 @@ class BayesianModel(ForagingModel):
             self._params[self._active_key]['lam_thresh'][env_id] = lam_opt
             self._params[self._active_key]['ll_thresh'][env_id] = self._ll_thresh
 
-    def _get_patch_indices(self, n_patch, index):
+    def _get_patch_indices(self, n_patch, index, error=True):
         # Get indices corresponding to patches to analyze.
         n_model = np.arange(max(n_patch[index]-self._N, 0), n_patch[index]+1)
         idx = np.argwhere(n_patch[np.newaxis, :] == n_model[:, np.newaxis])
         if idx.shape[0] < n_model.shape[0]:
-            raise SyntaxError('Insufficient data provided for {} previous patches.'
-                              .format(self._N))
-        return idx[:, 1]
+            if error:
+                raise SyntaxError('Insufficient data provided for {} previous patches.'
+                                .format(self._N))
+            else:
+                return None
+        else:
+            return idx[:, 1]
 
     def _predict(self, *,
                  t_motor_patch=None,
@@ -1230,6 +1303,7 @@ class BayesianModel(ForagingModel):
             warnings.warn('Patch numbers must be zero-indexed.', category=SyntaxWarning)
         
         # Iterate over sessions
+        self._debug_pred = {'lam': [], 'll': []} # DEBUG
         t_hat = []
         t_bin = np.linspace(bin_size, T_max, num=int(T_max/bin_size))
         iters = zip(t_motor_patch, dt_patch, n_patch, index, env_ids)
@@ -1247,21 +1321,26 @@ class BayesianModel(ForagingModel):
             # Iterate over patches within session
             i_p = np.nonzero(index)[0]
             t_hat.append(np.ones([len(i_p)])*np.nan)
+            self._debug_pred['lam'].append(np.ones([len(i_p), len(t_bin)])*np.nan) # DEBUG
+            self._debug_pred['ll'].append(np.ones([len(i_p), len(t_bin)])*np.nan) # DEBUG
             for j, m in enumerate(i_p):
                 # Get indices corresponding to patches to analyze
-                idx = self._get_patch_indices(n_p, m)
+                idx = self._get_patch_indices(n_p, m, error=False)
+                if idx is None:
+                    continue
 
                 # Add reward times if needed.
                 t_k = [t_m[k] for k in idx] 
                 T = t_p[idx]
                 if t_p[m] < T_max:
                     t_start = 0.0 if (len(t_m[m]) == 0) else t_m[m][-1]
+                    L0 = self.estimate_unobserved_events(L, t_start, t_p[m]-t_start)
                     t_k[-1] = np.append(t_k[-1], 
-                                        self.add_expected_reward_times(L, t_start, T_max))
+                                        self.add_expected_reward_times(L, t_p[m], T_max, N0=L0))
                     T[-1] = T_max
                 
                 # Iterate over each time bin.
-                for t in t_bin:
+                for k, t in enumerate(t_bin):
                     with np.errstate(divide='raise'):
                         # Compute MLE for Poisson parameters.
                         lam_MLE, tau_MLE = helper.estimate_parameters(t_k, 
@@ -1282,7 +1361,8 @@ class BayesianModel(ForagingModel):
                                                             history='consecutive', 
                                                             epsilon=0.1)
                         ll /= np.sum(T[:-1]) + t # normalize LL by total time of model
-                    
+                    self._debug_pred['lam'][-1][j, k] = lam_MLE
+                    self._debug_pred['ll'][-1][j, k] = ll
                     # Determine if criteria for patch-leaving decision are met.
                     # Note that we do not need to scale lam_MLE by L because 
                     # lam_opt is already scaled by L in patch_model.lam.
@@ -1306,12 +1386,12 @@ class FittedBayesianModel(BayesianModel):
         self._param_keys += ['logerr']
 
         # Placeholders for intermediate data
-        self._MLE = {}
+        self._cache = {}
 
     @property
-    def MLE(self):
+    def cache(self):
         try:
-            return self._MLE[self._active_key]
+            return self._cache[self._active_key]
         except KeyError:
             print('Model not yet fit to current dataset.')
             return {}
@@ -1429,7 +1509,9 @@ class FittedBayesianModel(BayesianModel):
             llt = np.ones([len(i_p)])*np.nan # log-likelihood threshold
             for j, m in enumerate(i_p):
                 # Get indices corresponding to patches to analyze.
-                idx = self._get_patch_indices(n_p, m)
+                idx = self._get_patch_indices(n_p, m, error=False)
+                if idx is None:
+                    continue
 
                 # Get reward and patch residence times.
                 t_k = [t_m[k] for k in idx] 
@@ -1467,6 +1549,8 @@ class FittedBayesianModel(BayesianModel):
             for k, v in zip(['lam_thresh', 'tau_leave', 'll_thresh'], [lt, tl, llt]):
                 if constrain and k != 'll_thresh': # do not constrain ll threshold
                     key = (tau, track)
+                elif constrain and k == 'll_thresh':
+                    key = self._V0
                 else:
                     key = 'all'
                 if key in params[k].keys():
@@ -1475,7 +1559,7 @@ class FittedBayesianModel(BayesianModel):
                     params[k][key] = [v]
             
         # Determine model parameter values for each data subset.
-        cache = copy.deepcopy(params) # copy all values to return
+        raw = copy.deepcopy(params) # copy all values to return
         for key, vals in params.items():
             # Determine metric
             if isinstance(percentile, dict):
@@ -1500,12 +1584,15 @@ class FittedBayesianModel(BayesianModel):
         for env_id in env_ids:
             tau = self.env_params[env_id]['tau']
             track = self.env_params[env_id]['track']
+            V0 = self.env_params[env_id]['V0']
             for key, vals in params.items():
                 for k, v in vals.items():
                     if isinstance(k, tuple):
                         match = (k == (tau, track))
                     elif constrain and key != 'll_thresh':
                         match = (k == track)
+                    elif constrain and key == 'll_thresh':
+                        match = (k == V0)
                     else:
                         match = (k == 'all')
                     
@@ -1519,7 +1606,7 @@ class FittedBayesianModel(BayesianModel):
         for name in param_names + ['tau_leave', 'dt_est']:
             self._params[self._active_key][name] = params[name]
         
-        return cache, copy.deepcopy(params) # copy normalized params for numerical fit
+        return raw, copy.deepcopy(params) # copy normalized params for numerical fit
 
     def _fit_num(self,
                  data,
@@ -1552,77 +1639,87 @@ class FittedBayesianModel(BayesianModel):
         lam_all = {env_id: [] for env_id in env_ids}
         ll_all = {env_id: [] for env_id in env_ids}
         Y = {env_id: [] for env_id in env_ids}
-
-        # Iterate over sessions
         t_bin = np.linspace(0.0, T_max, num=int(T_max/bin_size)+1)
-        iters = zip(data['t_motor_patch'], data['dt_patch'], data['n_patch'], 
-                    data['dt_interpatch'], data['index'], data['env_id'])
-        for i, (t_m, t_p, n_p, t_ip, index, env_id) in enumerate(iters):
-            # Check environment
-            if env_id not in env_ids:
-                raise RuntimeError('Environments must be in active'
-                                   ' list. Use set_data() to add environment {}.'
-                                   .format(env_id))
+        
+        # Iterate over sessions
+        if self._cache.get(self._active_key, None) is None:
+            iters = zip(data['t_motor_patch'], data['dt_patch'], data['n_patch'], 
+                        data['dt_interpatch'], data['index'], data['env_id'])
+            for i, (t_m, t_p, n_p, t_ip, index, env_id) in enumerate(iters):
+                # Check environment
+                if env_id not in env_ids:
+                    raise RuntimeError('Environments must be in active'
+                                    ' list. Use set_data() to add environment {}.'
+                                    .format(env_id))
+                
+                # Get environment parameters
+                self.set_environment(env_id)
+                r_0 = self._V0*self._lambda0
+                tau = self._tau
+                track = self._track
+                L = int(self.REWARD_VOLUME/self._V0)
+
+                # Iterate over patches within session
+                i_p = np.nonzero(index)[0] # patches to index
+                lam_i = np.ones([len(i_p), len(t_bin)-1])*np.nan # estimated lambda at each time point
+                ll_i = np.ones([len(i_p), len(t_bin)-1])*np.nan # log-likelihood at each time point
+                for j, m in enumerate(i_p):
+                    # Get indices corresponding to patches to analyze.
+                    idx = self._get_patch_indices(n_p, m, error=False)
+                    if idx is None:
+                        continue
+
+                    # Get reward and patch residence times.
+                    t_k = [t_m[k] for k in idx] 
+                    T = t_p[idx]
+                    if t_p[m] < T_max:
+                        t_start = 0.0 if (len(t_m[m]) == 0) else t_m[m][-1]
+                        L0 = self.estimate_unobserved_events(L, t_start, t_p[m]-t_start)
+                        t_k[-1] = np.append(t_k[-1], 
+                                            self.add_expected_reward_times(L, t_start, T_max, N0=L0))
+                        T[-1] = T_max
+
+                    # Find MLE for Poisson rate and corresponding likelihood for
+                    # all time points in t_bin, which will be used for error minimization.
+                    with np.errstate(divide='raise'):
+                        # Compute MLE for Poisson parameters.
+                        lam_MLE, tau_MLE = helper.estimate_parameters(t_k, 
+                                                                      t_bin,
+                                                                      L=L,
+                                                                      T=T,
+                                                                      model='hidden', 
+                                                                      history='consecutive')
+                        
+                        # Compute log-likelihood for MLE.
+                        ll = helper.estimate_log_likelihood(t_k,
+                                                            t_bin,
+                                                            L=L,
+                                                            T=T,
+                                                            lam=lam_MLE,
+                                                            tau=tau_MLE,
+                                                            model='hidden', 
+                                                            history='consecutive', 
+                                                            epsilon=0.1)
+                        ll /= np.sum(T[:-1]) + t_bin[1:] # normalize LL by total time of model
+
+                    # Save results
+                    lam_i[j, :] = lam_MLE
+                    ll_i[j, :] = ll
+
+                # Add discretized estimated values for optimization function.
+                lam_all[env_id].append(lam_i)
+                ll_all[env_id].append(ll_i)
+                Y[env_id].append(t_p[i_p]) # residence times (true value for error function)
             
-            # Get environment parameters
-            self.set_environment(env_id)
-            r_0 = self._V0*self._lambda0
-            tau = self._tau
-            track = self._track
-            L = int(self.REWARD_VOLUME/self._V0)
-
-            # Iterate over patches within session
-            i_p = np.nonzero(index)[0] # patches to index
-            lam_i = np.ones([len(i_p), len(t_bin)-1])*np.nan # estimated lambda at each time point
-            ll_i = np.ones([len(i_p), len(t_bin)-1])*np.nan # log-likelihood at each time point
-            for j, m in enumerate(i_p):
-                # Get indices corresponding to patches to analyze.
-                idx = self._get_patch_indices(n_p, m)
-
-                # Get reward and patch residence times.
-                t_k = [t_m[k] for k in idx] 
-                T = t_p[idx]
-                if t_p[m] < T_max:
-                    t_start = 0.0 if (len(t_m[m]) == 0) else t_m[m][-1]
-                    t_k[-1] = np.append(t_k[-1], 
-                                        self.add_expected_reward_times(L, t_start, T_max))
-                    T[-1] = T_max
-
-                # Find MLE for Poisson rate and corresponding likelihood for
-                # all time points in t_bin, which will be used for error minimization.
-                with np.errstate(divide='raise'):
-                    # Compute MLE for Poisson parameters.
-                    lam_MLE, tau_MLE = helper.estimate_parameters(t_k, 
-                                                                 t_bin,
-                                                                 L=L,
-                                                                 T=T,
-                                                                 model='hidden', 
-                                                                 history='consecutive')
-                    
-                    # Compute log-likelihood for MLE.
-                    ll = helper.estimate_log_likelihood(t_k,
-                                                        t_bin,
-                                                        L=L,
-                                                        T=T,
-                                                        lam=lam_MLE,
-                                                        tau=tau_MLE,
-                                                        model='hidden', 
-                                                        history='consecutive', 
-                                                        epsilon=0.1)
-                    ll /= np.sum(T[:-1]) + t_bin[1:] # normalize LL by total time of model
-
-                # Save results
-                lam_i[j, :] = lam_MLE
-                ll_i[j, :] = ll
-
-            # Add discretized estimated values for optimization function.
-            lam_all[env_id].append(lam_i)
-            ll_all[env_id].append(ll_i)
-            Y[env_id].append(t_p[i_p]) # residence times (true value for error function)
+            # Cache computationally expensive values.
+            self._cache[self._active_key] = {'lam': lam_all, 'll': ll_all, 'Y': Y} # save time-intensive computations
+        
+        else:
+            # Retrieve from previous computation.
+            lam_all, ll_all, Y = self._cache['lam'], self._cache['ll'], self._cache['Y']
         
         # Format inputs to optimization function as list of values for each
         # environment, with env_id order preserved.
-        self._MLE[self._active_key] = {'lam': lam_all, 'll': ll_all} # save time-intensive computations
         lam_all = [np.vstack(lam_all[env_id]) for env_id in env_ids]
         ll_all = [np.vstack(ll_all[env_id]) for env_id in env_ids]
         Y = [np.hstack(Y[env_id]) for env_id in env_ids]
@@ -1636,11 +1733,15 @@ class FittedBayesianModel(BayesianModel):
                        'x_init': x_init , 't_bin': t_bin}
         for i in range(max_iters):
             with np.errstate(invalid='raise'):
+                options = {'fatol': 1e-4, 
+                           'xatol': 1e-4, 
+                           'adaptive': True,
+                           'initial_simplex': self._build_initial_simplex(x_init, params)}
                 res = opt.minimize(self.bayesian_error, 
                                    x_init, 
                                    args=(Y, params, lam_all, ll_all, t_bin),
                                    method='Nelder-Mead',
-                                   options={'fatol': 1e-4, 'xatol': 1e-4, 'adaptive': True})
+                                   options=options)
             if abs(error - res.fun) <= ftol:
                 break
             elif i == max_iters - 1:
@@ -1724,3 +1825,19 @@ class FittedBayesianModel(BayesianModel):
         
         # Return logsum of squared error (more numerically stable)
         return np.log(np.sum(np.hstack(error)))
+
+    def _build_initial_simplex(self, x0, params):
+        N = len(x0)
+        sim = np.ones([N+1, N])*x0
+        for name, vals in params.items():
+            if 'index' not in vals.keys():
+                continue
+            elif name == 'lam_thresh':
+                scale = 1.05
+            elif name == 'll_thresh':
+                scale = 1.5
+            slc = vals['index']
+            sim[0, slc] /= scale
+            size = (slc.stop - slc.start)
+            sim[1:][slc, slc][np.diag_indices(size)] *= scale
+        return sim
