@@ -690,6 +690,7 @@ def _kernel_smoothing(counts,
                       axis=0,
                       kernel=None,
                       kernel_type='Gaussian',
+                      ignore_invalid=False,
                       **kwargs):
     
     # Create kernel if not provided
@@ -697,7 +698,7 @@ def _kernel_smoothing(counts,
         kernel = _create_smoothing_kernel(kernel_type, dt_bin ,**kwargs)
         
     # Smooth counts by convolving with kernel
-    n_smooth = _convolve(counts, kernel, axis=axis)
+    n_smooth = _convolve(counts, kernel, axis=axis, ignore_invalid=ignore_invalid)
     
     return n_smooth
     
@@ -711,7 +712,7 @@ def _create_smoothing_kernel(kernel_type, dt_bin, **kwargs):
         raise SyntaxError('Unknown kernel type "%s".' % kernel_type)
 
     
-def _convolve(x, k, axis=0):
+def _convolve(x, k, axis=0, ignore_invalid=False):
     if axis < 0:
         axis = x.ndim + axis
     a = axis
@@ -719,9 +720,14 @@ def _convolve(x, k, axis=0):
     x_smooth = np.zeros(x.shape)
     for i in range(x.shape[axis]):
         slc = tuple([slice(None)]*a + [i] + [slice(None)]*b)
-        idx = np.arange(x.shape[axis]) - i # zero-center mean
-        k_i = k(idx)[tuple([np.newaxis]*a + [slice(None)] + [np.newaxis]*b)]
-        x_smooth[slc] = np.sum(k_i * x, axis=axis)
+        k_i = k(np.arange(x.shape[axis]) - i) # zero-center mean
+        k_i /= np.sum(k_i) # normalize kernel weights
+        k_i = k_i[tuple([np.newaxis]*a + [slice(None)] + [np.newaxis]*b)] # broadcast shape
+        if ignore_invalid:
+            with np.errstate(invalid='ignore'):
+                x_smooth[slc] = np.sum(np.ma.masked_invalid(k_i*x), axis=axis)
+        else:
+            x_smooth[slc] = np.sum(k_i * x, axis=axis)
     
     return x_smooth
 
