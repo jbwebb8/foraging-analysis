@@ -1059,3 +1059,79 @@ def _hidden_process_LL(t_k, t_bin, T, lam, tau, history, L, epsilon=0.1):
         logp[i] = ll
 
     return logp
+
+def calculate_parameters(t_k,
+                         t_bin,
+                         T=None,
+                         lam=None,
+                         tau=None,
+                         model='full', 
+                         history='equal', 
+                         L=1):
+    """Compute values of one parameter given values of the other."""
+    # Check parameters
+    if not isinstance(t_k, list):
+        raise SyntaxError('t_k must be a list of arrays.')
+    if T is None:
+        T = t_bin[-1:] # make numpy array
+    elif not isinstance(T, np.ndarray):
+        T = np.atleast_1d(T)
+    assert len(T) == len(t_k)  
+    if t_bin[0] != 0.0:
+        raise ValueError('Time bins must start at 0.0')
+    if t_bin[-2] > T[-1]:
+        raise ValueError('Time bins must not exceed last residence time.')
+
+    # Check inputs
+    if not (lam is None)^(tau is None):
+        raise SyntaxError('Only one variable must be specified as None.')
+    elif tau is not None:
+        if not isinstance(tau, np.ndarray):
+            tau = np.array([[tau]])
+        elif tau.ndim == 1:
+            tau = tau[:, np.newaxis] # broadcast time on axis 1
+    elif lam is not None:
+        if not isinstance(lam, np.ndarray):
+            lam = np.array([[lam]])
+        elif lam.ndim == 1:
+            lam = lam[:, np.newaxis] # broadcast time on axis 1
+
+    # Calculate number of events at each time step
+    if model == 'full':
+        L = 1
+    elif model != 'hidden':
+        raise ValueError('Unknown model {}.'.format(model))
+    if history == 'full':
+        K = np.sum(np.hstack(t_k)[:, np.newaxis] <= t_bin[np.newaxis, 1:], axis=0)
+    elif history == 'consecutive':
+        K = sum([len(t_k_) for t_k_ in t_k[:-1]])
+        K += util.in_interval(t_k[-1], 
+                              np.zeros([len(t_bin)-1]), 
+                              t_bin[1:], 
+                              query='interval')
+        K = K[np.newaxis, :] # broadcast time on axis 1
+
+    # Calculate unknown parameter values
+    if tau is None:
+        raise NotImplementedError('Solving for tau not yet implemented.')
+    elif lam is None:
+        # Create placeholder array
+        lam = np.ones([tau.shape[0], t_bin.shape[0]-1])*np.nan
+        t = t_bin[np.newaxis, 1:]
+        T = T[:-1]
+        m = len(t_k)
+
+        # Handle finite values (non-homogeneous process)
+        idx = (tau < np.inf)[:, 0]
+        if len(T) > 0:
+            exp_sum = np.sum(np.exp(-T[np.newaxis, :]/tau[idx]), axis=1, keepdims=True)
+        else:
+            exp_sum = 0.0
+        lam[idx, :] = ( (L*K*np.exp(-t/tau[idx]))
+                         /(tau[idx]*(m - exp_sum - np.exp(-t/tau[idx])))
+                      ) 
+        
+        # Handle infinite values (homogeneous process)
+        lam[~idx, :] = L*K/(np.sum(T) + t)
+
+        return lam
