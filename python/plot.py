@@ -668,9 +668,6 @@ class Plotter:
                                r_factor=1.0,
                                order='ascending',
                                **kwargs):
-        """s=1.0,
-            r_factor=1.0,
-            order='ascending',"""
         return self._scatter_by_condition(data, 
                                           cond, 
                                           cond_params,
