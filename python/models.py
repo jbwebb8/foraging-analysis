@@ -1851,7 +1851,7 @@ class FittedBayesianModel(BayesianModel):
                         t_start = 0.0 if (len(t_m[m]) == 0) else t_m[m][-1]
                         L0 = self.estimate_unobserved_events(L, t_start, t_p[m]-t_start)
                         t_k[-1] = np.append(t_k[-1], 
-                                            self.add_expected_reward_times(L, t_start, T_max, N0=L0))
+                                            self.add_expected_reward_times(L, t_p[m], T_max, N0=L0))
                         T[-1] = T_max
 
                     # Find MLE for Poisson rate and corresponding likelihood for
@@ -1936,7 +1936,7 @@ class FittedBayesianModel(BayesianModel):
         else:
             # Retrieve from previous computation.
             lam_all, ll_all, lhw_all, Y = \
-                self._cache['lam'], self._cache['ll'], self.cache['lhw'], self._cache['Y']
+                self.cache['lam'], self.cache['ll'], self.cache['lhw'], self.cache['Y']
         
         # Format inputs to optimization function as list of values for each
         # environment, with env_id order preserved.
