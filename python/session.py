@@ -810,8 +810,12 @@ class TTSession(Session):
                 # Otherwise, jump to next patch
                 i += 2
         
-        # Return trimmed patch times as [N x 2] array
-        return np.array(t_patch).reshape([-1, 2], order='C')
+        # Reshape trimmed patch times to [N x 2] array. Remove entry delay
+        # from patch start time.
+        t_patch = np.array(t_patch).reshape([-1, 2], order='C')
+        assert (np.diff(t_patch, axis=1) >= entry_delay).all()
+        t_patch[:, 0] += entry_delay
+        return t_patch
 
     def save(self, filepath):
         """
@@ -940,21 +944,26 @@ class TTSession(Session):
         Calculate the reward times within a patch by integrating
         an exponential decay function.
         """
-        # Parameters
-        tau = self.params['Reward']['tau']
-        r_0 = self.params['Reward']['r_0']
-        R_0 = self.params['Reward']['R_0']
+        if self.version < 1.0:
+            # Parameters
+            tau = self.params['Reward']['tau']
+            r_0 = self.params['Reward']['r_0']
+            R_0 = self.params['Reward']['R_0']
 
-        # Calculate pre-determined reward times
-        n = np.arange(int(tau*r_0/R_0)) # max number of rewards
-        t_reward = -tau*np.log(1.0 - (n*R_0)/(tau*r_0)) # seconds
+            # Calculate pre-determined reward times
+            n = np.arange(int(tau*r_0/R_0)) # max number of rewards
+            t_reward = -tau*np.log(1.0 - (n*R_0)/(tau*r_0)) # seconds
 
-        # Add task-specific delays
-        t_reward += (self.params['Delay']['FirstBetweenDispensingDelay']
-                    + np.arange(1, len(n)+1) * self.params['Delay']['PreDispenseToneDelay']
-                    + np.arange(0, len(n))   * sum([self.params['Delay']['PostDispenseDelay'], self.params['Delay']['PostDispenseToneDelay']]))/1000
-        
-        return t_reward
+            # Add task-specific delays
+            t_reward += (self.params['Delay']['FirstBetweenDispensingDelay']
+                        + np.arange(1, len(n)+1) * self.params['Delay']['PreDispenseToneDelay']
+                        + np.arange(0, len(n))   * sum([self.params['Delay']['PostDispenseDelay'], self.params['Delay']['PostDispenseToneDelay']]))/1000
+            
+            return t_reward
+
+        else:
+            raise NotImplementedError('Reward time calculation not implemented '
+                                      'for Poisson drip task.')
 
 
 class LVSession(Session):
