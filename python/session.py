@@ -1061,6 +1061,15 @@ class LVSession(Session):
     
     def _ASCII_to_bool(self, s):
         return bool([u''.join(chr(c) for c in s)][0])
+
+    @property
+    def chamber_number(self):
+        # Get chamber number (suffix for DAQ data)
+        chamber_id = self.settings['global']['chamber_id']
+        if 'ephys' in chamber_id.lower():
+            return '1'
+        else:
+            return self.settings['global']['chamber_id'][-1]
     
     def _load_data(self, name):
         # Check if raw data file available
@@ -1070,24 +1079,17 @@ class LVSession(Session):
                     'in constructor.').format(name)
             raise UserWarning(msg)
 
-        # Get chamber number (suffix for DAQ data)
-        chamber_id = self.settings['global']['chamber_id']
-        if 'ephys' in chamber_id.lower():
-            chamber_number = '1'
-        else:
-            chamber_number = self.settings['global']['chamber_id'][-1]
-
         # Data names
         if name == 'sound':
-            return self.f['UntitledSound' + chamber_number]['Data'][0, :]
+            return self.f['UntitledSound' + self.chamber_number]['Data'][0, :]
         elif name == 'lick':
-            return self.f['UntitledLick' + chamber_number]['Data'][0, :]
+            return self.f['UntitledLick' + self.chamber_number]['Data'][0, :]
         elif name == 'motor':
-            return self.f['UntitledMotor' + chamber_number]['Data'][0, :]
+            return self.f['UntitledMotor' + self.chamber_number]['Data'][0, :]
         elif name ==  'cam':
-            return self.f['UntitledCam' + chamber_number]['Data'][0, :]
+            return self.f['UntitledCam' + self.chamber_number]['Data'][0, :]
         elif name == 'fs':
-            return 1.0 / self.f['UntitledSound' + chamber_number]['Property']['wf_increment'][0, 0]
+            return 1.0 / self.f['UntitledSound' + self.chamber_number]['Property']['wf_increment'][0, 0]
         elif name == 'wheel_speed':
             return self.f['UntitledWheelSpeed']['Data'][0, :] * 100 # cm/s
         elif name == 'wheel_time':
@@ -1118,7 +1120,7 @@ class LVSession(Session):
             return self._get_patch_times(name)
         elif name in ['s_var', 'fs_s', 't_s']:
             return self.preprocess_sound(name, **kwargs)
-        elif name in ['t_motor', 'dt_motor', 'n_motor_rem']:
+        elif name in ['t_motor', 'dt_motor', 'n_motor_rem', 't_motor_all']:
             return self._get_motor_times(name)
         elif name == 't_lick':
             return self._get_lick_times()
@@ -1138,7 +1140,7 @@ class LVSession(Session):
         req_data = ['fs']
         self._check_attributes(data_names=req_data)
 
-        return self.f['UntitledSound' + chamber_number]['Total_Samples'][0, 0]/self.data['fs']
+        return self.f['UntitledSound' + self.chamber_number]['Total_Samples'][0, 0]/self.data['fs']
 
     def preprocess_sound(self, var_name, **kwargs):
         required_data = ['sound', 'fs']
@@ -1801,12 +1803,13 @@ class PoissonSession(LVSession):
         self._sound_kwargs =  [{'med_filter_size': None,
                                 'butter_filter_fc': fc}
                                for fc in [1.0, 0.5, 0.25, 0.1, 0.05]]
-        # Median filter computationally expensive and doesn't seem to improve fit.
-        #self._sound_kwargs += [{'med_filter_size': t,
-        #                        'med_filter_unit': 'time',
-        #                        'butter_filter_fc': None}
-        #                        for t in [0.5, 1.0, 2.0, 4.0, 8.0]]
-        #
+        # Median filter computationally expensive but necessary in some cases,
+        # attempt if Butter filter fails.
+        self._sound_kwargs += [{'med_filter_size': t,
+                                'med_filter_unit': 'time',
+                                'butter_filter_fc': None}
+                                for t in [0.5, 1.0, 2.0, 4.0, 8.0]]
+        
     def _load_subclass_data(self, name):
         if name == 'reward':
             self._check_attributes(var_names=['t_motor', 'n_motor_rem'])
