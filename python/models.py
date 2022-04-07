@@ -620,7 +620,52 @@ class ForagingModel:
 class HeuristicModel(ForagingModel):
 
     def __init__(self):
+        """Placeholder class for any future updates to heuristic models."""
         super().__init__()
+
+
+class FixedTimeModel(HeuristicModel):
+    def __init__(self):
+        super().__init__()
+
+        # Set data
+        self._data_keys += ['dt_patch']
+
+        # Set params
+        self._param_keys += ['dt_mean', 'dt_median']
+
+    def _fit(self, data):
+        # Get relevant data
+        args = (data['dt_patch'], data['env_id'])
+        dt_patch, (env_ids,) = self.unravel(*args)
+        assert len(dt_patch) == len(env_ids)
+        
+        # Get appropriate measures of center of distributions
+        self._params[self._active_key]['dt_mean']   = np.mean(dt_patch)
+        self._params[self._active_key]['dt_std']    = np.std(dt_patch)
+        self._params[self._active_key]['dt_median'] = np.median(dt_patch)
+
+        return dt_patch
+
+    def _predict(self, *, dt_patch=None, env_ids=None, method='mean'):
+        # Get current parameters
+        key = 'dt_' + method
+        dt = self._params[self._active_key][key]
+
+        # Get test data
+        if dt_patch is None:
+            dt_patch = self.test_data['dt_patch']
+        if env_ids is None:
+            env_ids = self.test_data['env_id']
+
+        # Unravel session data
+        dt_patch, (env_ids,) = self.unravel(dt_patch, env_ids)
+        assert len(dt_patch) == len(env_ids)
+
+        # Predict as single estimate
+        t_hat = np.ones([len(dt_patch)])*dt
+
+        return t_hat
 
 
 class RewardTimeModel(HeuristicModel):
@@ -801,7 +846,10 @@ class RewardNumberModel(RewardTimeModel):
 
                 # Find expected time of reward n_i
                 N = (n_i - len(t_m))*int(self.REWARD_VOLUME/self._V0)
-                N0 = self.estimate_unobserved_events(N, t_start, t_p-t_start)
+                try:
+                    N0 = self.estimate_unobserved_events(N, t_start, t_p-t_start)
+                except ValueError:
+                    print(N, t_start, t_p, env_id, n_i, t_m)
                 t_hat[i] = self.get_expected_wait_time(N-N0, t_start)
 
             # Otherwise, take time of nth reward
@@ -879,13 +927,29 @@ class MVTModel(ForagingModel):
         self._param_keys += ['dt_est']
 
     def _fit(self, data, percentile=0.1):
-        # Estimate true travel time
-        dt_interpatch = np.array(self.unravel(data['dt_interpatch']))
-        idx = int((len(dt_interpatch)-1)*percentile)
-        if len(dt_interpatch) == 0:
-            self._params[self._active_key]['dt_est'] = np.array([])
-        else:
-            self._params[self._active_key]['dt_est'] = np.sort(dt_interpatch)[idx]
+        # Get relevant data
+        args = (data['dt_interpatch'], data['env_id'])
+        dt_interpatch, (env_ids,) = self.unravel(*args)
+        dt_interpatch = np.array(dt_interpatch)
+        env_ids = np.array(env_ids)
+        assert len(dt_interpatch) == len(env_ids)
+        
+        # Determine all track types in dataset.
+        tracks = np.ones([len(env_ids)])*np.nan
+        for env_id in np.unique(env_ids):
+            idx = (env_ids == env_id)
+            tracks[idx] = self.env_params[env_id]['track']
+        
+        # Estimate true travel time for each track length.
+        if 'dt_est' not in self._params[self._active_key].keys():
+            self._params[self._active_key]['dt_est'] = {}
+        for track in np.unique(tracks):
+            idx = (tracks == track)
+            index = int((len(dt_interpatch[idx])-1)*percentile)
+            if len(dt_interpatch) == 0:
+                self._params[self._active_key]['dt_est'][track] = np.array([])
+            else:
+                self._params[self._active_key]['dt_est'][track] = np.sort(dt_interpatch[idx])[index]
 
     def _predict(self, *, env_ids=None):
         # Get relevant data
@@ -906,12 +970,15 @@ class MVTModel(ForagingModel):
                 raise RuntimeError('Environments for prediction must be in active'
                                    ' list. Use set_data() to add environment {}.'
                                    .format(env_id))
+            elif self.env_params[env_id]['track'] not in self.params['dt_est'].keys():
+                raise ValueError('Model has not been fit to track type {}.'
+                .format(self.env_params[env_id]['track']))
             
             # Get environment parmeters
             self.set_environment(env_id)
             r_0 = self._V0*self._lambda0
             tau = self._tau
-            t_t = self._params[self._active_key]['dt_est']
+            t_t = self._params[self._active_key]['dt_est'][self._track]
 
             # Find optimal residence times
             preds, _ = helper.get_optimal_values(t_t=t_t, 
@@ -942,7 +1009,8 @@ class FittedMVTModel(MVTModel):
              param_names,
              constrain=False,
              plot_results=False,
-             percentile=0.1):
+             percentile=0.1,
+             lam=0.0):
         # Check params
         if not isinstance(param_names, list):
             param_names = [param_names]
@@ -992,7 +1060,7 @@ class FittedMVTModel(MVTModel):
 
             # Assign values in corresponding parameter placeholder
             idx = np.array([env_ids.index(env) for env in envs])
-            params['t_t']['value'][idx] = self._params[self._active_key]['dt_est']
+            params['t_t']['value'][idx] = self._params[self._active_key]['dt_est'][val]
 
         if constrain:
             # Build initial vector by concatenating initial experimental values
@@ -1044,11 +1112,12 @@ class FittedMVTModel(MVTModel):
         vals, idx = np.unique(params['t_t']['value'], return_index=True)
         self._params[self._active_key]['t_t_exp'] = vals
         self._params[self._active_key]['track_exp'] = params['track']['value'][idx]
+        exp_params = {name: params[name]['value'] for name in self.MVT_PARAMS}
                         
         # Optimize x as minimizing MSE of residence times
         for gtol in [1e-5, 1e-4, 1e-3]:
             res = opt.minimize(self.mvt_error, x_init, 
-                               args=(Y, params), 
+                               args=(Y, params, exp_params, lam), 
                                method='BFGS',
                                options={'gtol': gtol})
             if res.success:
@@ -1075,7 +1144,7 @@ class FittedMVTModel(MVTModel):
                 x = np.linspace(1, 2*res.x, num=50)
                 err = np.zeros([50])
                 for j, x_j in enumerate(x):
-                    err[j] = self.mvt_error(x_j, Y, params)
+                    err[j] = self.mvt_error(x_j, Y, params, exp_params, lam)
                 ax.plot(x, err, color=cmap(0.5))
                 ax.axvline(res.x, color=cmap(0.1), linestyle='--')
                 ax.set_xlabel(param_names[0])
@@ -1088,7 +1157,8 @@ class FittedMVTModel(MVTModel):
                 err = np.zeros([50, 50])
                 for j in range(50):
                     for k in range(50):
-                        err[j, k] = self.mvt_error(np.array([x1[j,k], x2[j,k]]), Y, params)
+                        err[j, k] = self.mvt_error(np.array([x1[j,k], x2[j,k]]), 
+                                                   Y, params, exp_params, lam)
                 dx = np.diff(x, axis=0).mean()
                 ax.pcolormesh(x1, x2, err[:-1, :-1], cmap='coolwarm')
                 ax.set_xlabel(param_names[0])
@@ -1097,10 +1167,13 @@ class FittedMVTModel(MVTModel):
                                for var in param_names])
             ax.set_title('experimental params:\n' + title)
 
-        return res, x_init, Y, params
+        return res, x_init, Y, params, exp_params
 
     @staticmethod
-    def mvt_error(x, Y, params, broadcast_shape=False):
+    def mvt_error(x, Y, params, exp_params, lam=0.0, broadcast_shape=False):
+        # Check arguments
+        assert lam >= 0.0, 'Regularization constant must be non-negative.'
+        
         # Set parameter values
         loc = []
         for var in ['t_t', 'R_0', 'r_0', 'tau']:
@@ -1128,9 +1201,13 @@ class FittedMVTModel(MVTModel):
         error = []
         for i in range(len(Y)):
             error.append((Y[i] - y_hat[i])**2)
+        error = np.hstack(error)
+
+        # Add regularization term
+        reg = np.sum((t_t - exp_params['t_t'])**2 + (tau - exp_params['tau'])**2)
         
         # Return logsum of squared error (more numerically stable)
-        return np.log(np.sum(np.hstack(error)))
+        return np.log(np.mean(error) + lam*reg)
 
     def _predict(self, *, env_ids=None):
         # Get relevant data
