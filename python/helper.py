@@ -15,16 +15,28 @@ def med_filt(x, n=3, ignore_nan=True):
     else:
         med_func = np.median
 
-    # Group columns to which to apply median.
+    return simple_filter(x, med_func, n)
+
+def ma_filt(x, n=3, ignore_nan=True):
+    # Determine handling of nan values
+    if ignore_nan:
+        ma_func = np.nanmean
+    else:
+        ma_func = np.mean
+
+    return simple_filter(x, ma_func, n)
+
+def simple_filter(x, func, n=3):
+    # Group columns to which to apply function.
     X = np.zeros([n, len(x)])
     for i in range(n):
         X[i] = np.roll(x, -(n//2) + i)
     
-    # Find median in each column and correct end effects.
-    x_filt = med_func(X, axis=0)
+    # Apply function to each column and correct end effects.
+    x_filt = func(X, axis=0)
     for i in range(n//2):
-        x_filt[i] = med_func(X[:(n//2 + i + 1), i])
-        x_filt[-(i+1)] = med_func(X[(n//2 - i):, -(i+1)])
+        x_filt[i] = func(X[:(n//2 + i + 1), i])
+        x_filt[-(i+1)] = func(X[(n//2 - i):, -(i+1)])
    
     return x_filt
 
@@ -123,23 +135,43 @@ def compare_patch_times(dt_patch_1, dt_patch_2, atol=1.0, rtol=0.02):
         elif len(dt_patch_1) == 0 or len(dt_patch_2) == 0:
             return False
 
-        # Corner case 1: last segment unreliably logged
-        idx_last = min(len(dt_patch_1), len(dt_patch_2))
+        # # Corner case 1: last segment unreliably logged
+        # idx_last = min(len(dt_patch_1), len(dt_patch_2))
 
-        # Corner case 2: first segment unreliably logged if too short
-        if min(dt_patch_1[0], dt_patch_2[0]) < 0.5:
-            dt_patch_1 = dt_patch_1[1:]
-            dt_patch_2 = dt_patch_2[1:]
-            idx_last -= 1
+        # # Corner case 2: first segment unreliably logged if too short
+        # if min(dt_patch_1[0], dt_patch_2[0]) < 1.5:
+        #     dt_patch_1 = dt_patch_1[1:]
+        #     dt_patch_2 = dt_patch_2[1:]
+        #     idx_last -= 1
 
-        # Corner case 3: only one patch, dropped above
-        if ((dt_patch_1.size == 0 or dt_patch_2.size == 0)
-            or (abs(dt_patch_1.shape[0] - dt_patch_2.shape[0]) > 1)):
+        # # Corner case 3: only one patch, dropped above
+        # if ((dt_patch_1.size == 0 or dt_patch_2.size == 0)
+        #     or (abs(dt_patch_1.shape[0] - dt_patch_2.shape[0]) > 1)):
+        #     return False
+        # else:
+        #     return np.isclose(dt_patch_1[:idx_last], 
+        #                     dt_patch_2[:idx_last],
+        #                     atol=atol, rtol=rtol).all()
+
+        offset = len(dt_patch_1) - len(dt_patch_2)
+        n = max(len(dt_patch_1), len(dt_patch_2))
+        if abs(offset) > 2: # corner cases should only be first and/or last patch
             return False
+        elif offset > 0:
+            return any([np.isclose(dt_patch_1[i:n-(offset-i)], 
+                                   dt_patch_2[:],
+                                   atol=atol, rtol=rtol).all()
+                        for i in range(offset+1)])
+        elif offset < 0:
+            return any([np.isclose(dt_patch_1[:], 
+                                   dt_patch_2[i:n-(abs(offset)-i)],
+                                   atol=atol, rtol=rtol).all()
+                        for i in range(abs(offset)+1)])
         else:
-            return np.isclose(dt_patch_1[:idx_last], 
-                            dt_patch_2[:idx_last],
-                            atol=atol, rtol=rtol).all()
+            return np.isclose(dt_patch_1, 
+                              dt_patch_2,
+                              atol=atol, rtol=rtol).all()
+
 
 
 ### Patch-foraging theory ###
@@ -1135,3 +1167,181 @@ def calculate_parameters(t_k,
         lam[~idx, :] = L*K/(np.sum(T) + t)
 
         return lam
+
+
+### Tree data structures ###
+class Tree:
+    
+    def __init__(self, name, value):
+        """
+        Class for handling hierarchical data. One caveat to the traditional
+        data structure is that the penultimate level simply has the values,
+        rather than object pointers, of its children. This allows for faster
+        subsampling in the generate_sample() method.
+        """
+        self.name = name
+        self.value = value
+        self.parent = None
+        self.children = None
+        self.penultimate = False
+        
+    def set_parent(self, parent):
+        self.parent = parent
+        
+    def set_children(self, children):
+        self.children = children
+        
+    def get_ancestry(self, order='descending'):
+        """Returns list of parent Tree objects in specified order."""
+        ancestry = []
+        tree = self.parent
+        while tree is not None:
+            ancestry.append(tree)
+            tree = tree.parent
+        
+        if order == 'ascending':
+            return ancestry
+        elif order == 'descending':
+            return ancestry[::-1]
+        else:
+            raise ValueError('Unknown error {}.'.format(order))
+    
+    def get_index(self, order='descending'):
+        """
+        Returns values of node ancestry in specified order. Ignores
+        parent values if None.
+        """
+        index = [p.value for p in self.get_ancestry(order=order) 
+                 if p is not None]
+        
+        if order == 'ascending':
+            index.insert(0, self.value)
+        elif order == 'descending':
+            index.append(self.value)
+        else:
+            raise ValueError('Unknown error {}.'.format(order))
+            
+        return tuple(index)
+   
+    def generate_sample(self, seed=None, size=None, n=None, verbose=False):
+        """
+        Generates a sample of the leaf nodes by randomly sampling, with
+        replacement, at each level of the tree. Done many times, this is 
+        equivalent to hierarchical bootstrapping.
+
+        Args:
+        - seed: Random seed for random number generator.
+        - size: Total size of sample. If none, returns first subsample,
+            regardless of size.
+        - n: Size of sampling at the leaf nodes. If None, all samples from
+            each leaf node are used.
+        - verbose: If True, notify user if leaf node has less than n samples.
+
+        Returns:
+        - sample: 1D array of sampled values.
+        """
+        if size is None:
+            size = 1 # generate single subsample
+        
+        # Build sample until size requirement satisfied.
+        sample = []
+        rng = np.random.default_rng(seed=seed)
+        while len(sample) < size:
+            subsample = []
+            self._generate_sample(self, rng, subsample, n, verbose)
+            subsample = np.hstack(subsample)
+            sample = np.hstack([sample, subsample])
+            
+        # Randomly trim last subsample to ensure equal size.
+        if size > 1:
+            diff = len(sample) - size
+            idx = np.arange(len(sample) - len(subsample), len(sample))
+            idx = rng.choice(idx, size=len(subsample)-diff, replace=False)
+            idx = np.hstack([np.arange(len(sample) - len(subsample)), idx])
+            sample = sample[idx]
+            assert len(sample) == size
+            
+        return sample
+    
+    @staticmethod
+    def _generate_sample(tree, rng, sample, n, verbose=False):
+        """Recursive method for traversing tree by sampling with replacement."""
+        # Create random sample of children.
+        idx = rng.choice(np.arange(len(tree.children)), 
+                         size=len(tree.children),
+                         replace=True)
+
+        if tree.penultimate:
+            # If penultimate node, return sample of children values.
+            if n is None:
+                n = len(tree.children)
+            elif len(tree.children) < n and verbose:
+                print(RuntimeWarning('tree length'))
+            return tree.children[idx[:n]]
+        else:
+            # Otherwise, return values from traversing tree 
+            # at each sampled child node.
+            for i in idx:
+                s = Tree._generate_sample(tree.children[i], rng, sample, n, verbose)
+                if s is not None:
+                    sample.append(s)
+
+
+def make_tree(df, levels, init_value):
+    """
+    Recursive method for building tree structure from hierarchical data.
+    Note that the dataframe must have multiindexing, which can be achieved
+    by the following:
+
+    df = df.set_index([index_1, index_2, ...])
+
+    such that subsets can be located by:
+
+    subset = df.loc[val_1, val_2, ...]
+
+    The initial value provided pertains to the first level in levels.
+    """
+    return _make_tree(df, levels, 0, None, init_value)
+
+def _make_tree(df, levels, depth, parent, value):
+    # Handle leaves of tree
+    if depth >= len(levels):
+        return None
+    elif depth == len(levels) - 1:
+        return value
+    else:
+        # Create tree at current depth
+        tree = Tree(levels[depth], value)
+        tree.set_parent(parent)
+    
+    # Determine unique values of next hierarchical level.
+    index = tree.get_index()
+    level = levels[depth+1] 
+    vals = sorted(df.loc[index].index.unique(level=level))
+
+    # Create child for each unique value.
+    children = []
+    for val in vals:
+        children.append(_make_tree(df, levels, depth+1, tree, val))
+    
+    # Set children.
+    if depth == len(levels) - 2:
+        # At penultimate node, simply set children equal to their values.
+        tree.penultimate = True
+        children = np.array(children)
+    tree.set_children(children)
+    
+    return tree
+
+def check_tree(tree, n):
+    """Check that each node at the level above animals has at least n animals."""
+    if len(tree.children) > 0:
+        if tree.children[0].name == 'mouse_id':
+            if len(tree.children) < n:
+                warnings.warn('Node at {} only has {} animals.'
+                              .format(tree.get_index(), len(tree.children)),
+                              category=RuntimeWarning)
+        else:
+            for child in tree.children:
+                check_tree(child, n)
+        
