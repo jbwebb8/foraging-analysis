@@ -3,7 +3,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import math
 import random
+import warnings
 from util import get_patch_statistics, _check_list, in_interval
+import ephys
 
 class Plotter:
 
@@ -1106,6 +1108,65 @@ class Plotter:
             cond_order -= np.sum(gt, axis=0)
         
         return cond_order
+
+    def plot_distribution(self, x, 
+                          model,
+                          c=0.5,
+                          figsize=(15, 15),
+                          new_fig=True,
+                          label=None,
+                          bins=None,
+                          center=None,
+                          hist_kwargs={},
+                          dist_kwargs={}):
+        # Check input data. Should be 1D vector.
+        if isinstance(x, list):
+            x = np.array(x)
+        if not isinstance(x, np.ndarray):
+            raise SyntaxError('x must be numpy array.')
+        elif x.ndim > 1:
+            raise SyntaxError('x must be a 1D array.')
+
+        # Check model attributes.
+        if not isinstance(model, ephys.Distribution):
+            warnings.warn('model is not instance of the Distribution class.'
+                          + ' Unexpected behavior may occur.')
+        elif not (callable(getattr(model, 'fit', None)) and
+                  callable(getattr(model, 'pdf', None))):
+            raise SyntaxError('model must have fit() and pdf() methods.')
+
+        # Create new figure.
+        if new_fig:
+            self.create_new_figure(figsize=figsize)
+        
+        # Plot histogram of data.
+        self.ax.hist(x,
+                     bins=bins,
+                     color=self.cmap(c),
+                     label=label,
+                     **hist_kwargs)
+    
+        # Plot fitted distribution.
+        model.fit(x)
+        t = np.linspace(x.min(), x.max(), num=1000)
+        self.ax.plot(t, model.pdf(t),
+                     color=self.cmap(c),
+                     **dist_kwargs)
+        self.ax.fill_between(t, model.pdf(t),
+                             color=self.cmap(c),
+                             alpha=0.3)
+        
+        # Plot center metric if specified.
+        if center is not None:
+            if center == 'mean':
+                x_center = x.mean()
+            elif center == 'median':
+                x_center = x.median()
+            else:
+                raise ValueError('Unknown center \'{}\'.'.format(center))
+            self.ax.axvline(x_center,
+                            color=self.cmap(c),
+                            **dist_kwargs)
 
     def save_figure(self, filepath, ext='pdf', dpi=None):
         plt.savefig(filepath, format=ext, dpi=dpi)
