@@ -1985,7 +1985,7 @@ class Gaussian(Distribution):
         m = X.shape[1] # number of dimensions
         
         if self._den == None:
-            self._den = np.sqrt(np.pi**m * np.linalg.det(self._Sigma))
+            self._den = np.sqrt((2.0*np.pi)**m * np.linalg.det(self._Sigma))
         if self._Sigma_inv is None:
             self._Sigma_inv = np.linalg.inv(self._Sigma)
         num = np.exp(-0.5*np.diag((X - self._mu).dot(self._Sigma_inv.dot((X - self._mu).T))))
