@@ -1,6 +1,7 @@
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+import scipy.stats as stats
 import math
 import random
 import warnings
@@ -711,6 +712,34 @@ class Plotter:
                                           plot_subjects=plot_subjects,
                                           **kwargs)
 
+    def density_by_condition(self,
+                             data, 
+                             cond, 
+                             cond_params,
+                             include_cond=None,
+                             c=0.5,
+                             figsize=(15, 15),
+                             new_fig=True,
+                             x_offset=0.0,
+                             x_spacing=None,
+                             plot_subjects=True,
+                             bw_method=None,
+                             density_scale=1.0,
+                             **kwargs):
+        return self._scatter_by_condition(data, 
+                                          cond, 
+                                          cond_params,
+                                          plot_type='density',
+                                          include_cond=include_cond,
+                                          c=c,
+                                          figsize=figsize,
+                                          new_fig=new_fig,
+                                          x_offset=x_offset,
+                                          x_spacing=x_spacing,
+                                          plot_subjects=plot_subjects,
+                                          bw_method=bw_method,
+                                          density_scale=density_scale,
+                                          **kwargs)
 
     def _scatter_by_condition(self,
                               data,
@@ -731,7 +760,49 @@ class Plotter:
                               max_pts=None,
                               xlim=None,
                               ylim=None,
+                              bw_method=None,
+                              density_scale=1.0,
+                              reflect_x=False,
                               **kwargs):
+        # Define main function with arguments above.
+        def _plot_data(y, c_y, center, xlim, ylim):
+            if plot_type.lower() == 'swarm':
+                if max_pts is not None:
+                    idx = np.random.permutation(np.arange(len(y)))[:max_pts]
+                    y = y[idx]
+                    c_y = c_y[idx]
+                x = center*np.ones(y.shape[0])
+                x, y = self._apply_swarm_spacing(x, y,
+                                            s=s,
+                                            r_factor=r_factor,
+                                            order=order,
+                                            xlim=xlim,
+                                            ylim=ylim)
+                self.ax.scatter(x, y, 
+                                color=self.cmap(c_y),
+                                s=s,
+                                **kwargs)
+            elif plot_type.lower() == 'box':
+                self.ax.boxplot(y,
+                                positions=np.array([center]), 
+                                **kwargs)
+            elif plot_type.lower() == 'density':
+                density = stats.gaussian_kde(y, bw_method=bw_method)
+                pts = np.linspace(y.min(), y.max(), num=1000)
+                x = center + ((-1)**reflect_x)*density_scale*density(pts)
+                if not np.isclose(c_y[0], c_y).all():
+                    warnings.warn('Only one color value can be applied to density '
+                                  'plot. Using first value as default.',
+                                  category=SyntaxWarning)
+                c_y = c_y[0]
+                self.ax.plot(x, pts,
+                             color=self.cmap(c_y),
+                             **kwargs)
+                self.ax.fill_betweenx(pts, x1=x, x2=center,
+                                      color=self.cmap(c_y),
+                                      alpha=0.3)
+            else:
+                raise ValueError('Unknown scatter type \'{}\'.'.format(plot_type))
 
         # Create new figure
         if new_fig:
@@ -739,14 +810,24 @@ class Plotter:
         
         # Convert to dictionary if needed (e.g. single animal data)
         if not isinstance(data, dict):
+            # Ensure other parameters are not dictionaries.
+            assert not (isinstance(cond, dict) or isinstance(c, dict))
+
+            # Handle data format for color argument.
+            if not isinstance(c, (list, np.ndarray)):
+                c = [c]
+            if len(c) == 1:
+                c = c*np.ones([len(cond)])
+
+            # Convert to dummy format.
             data = {'mouse': data}
             cond = {'mouse': cond}
+            c    = {'mouse': c}
         
         # Plot combined data
         # Get consolidated data across animals
-        d_plot, cond_plot = get_patch_statistics(data, 
-                                                 ids=cond, 
-                                                 return_all=True)
+        d_plot, cond_plot, (c_plot,) = \
+                get_patch_statistics(data, cond, c, return_all=True)
 
         # Format included conditions
         if include_cond is None:
@@ -758,6 +839,7 @@ class Plotter:
         idx = np.isin(cond_plot, include_cond)
         d_plot = d_plot[idx]
         cond_plot = cond_plot[idx]
+        c_plot = c_plot[idx]
 
         # Determine plot order (patch statistics returned sorted by default)
         idx = np.argwhere(include_cond[np.newaxis, :] == np.unique(cond_plot)[:, np.newaxis])
@@ -803,26 +885,8 @@ class Plotter:
         # Plot consolidated data
         for cond_i, center in zip(include_cond, centers):
             y = d_plot[cond_plot == cond_i]
-            if plot_type.lower() == 'swarm':
-                if max_pts is not None:
-                    y = np.random.permutation(y)[:max_pts]
-                x = center*np.ones(y.shape[0])
-                x, y = self._apply_swarm_spacing(x, y,
-                                            s=s,
-                                            r_factor=r_factor,
-                                            order=order,
-                                            xlim=xlim,
-                                            ylim=ylim)
-                self.ax.scatter(x, y, 
-                                color=self.cmap(c),
-                                s=s,
-                                **kwargs)
-            elif plot_type.lower() == 'box':
-                self.ax.boxplot(y,
-                                positions=np.array([center]), 
-                                **kwargs)
-            else:
-                raise ValueError('Unknown scatter type \'{}\'.'.format(plot_type))
+            c_y = c_plot[cond_plot == cond_i]
+            _plot_data(y, c_y, center, xlim, ylim)
 
         # Format axis
         self.ax.set_xticks([]) # clear default ticks
@@ -841,13 +905,21 @@ class Plotter:
             for i, mouse_id in enumerate(data.keys()):
                 # Get all data for animal
                 d_plot, cond_plot = get_patch_statistics(data[mouse_id],
-                                                    ids=cond[mouse_id],
-                                                    return_all=True)
+                                                         ids=cond[mouse_id],
+                                                         return_all=True)
+                if isinstance(c, dict):
+                    _, c_plot = get_patch_statistics(data[mouse_id], 
+                                                     ids=c[mouse_id], 
+                                                     return_all=True)
+                else:
+                    c_plot = c*np.ones(len(d_plot))
+                                                    
 
                 # Exclude condition data
                 idx = np.isin(cond_plot, include_cond)
                 d_plot = d_plot[idx]
                 cond_plot = cond_plot[idx]
+                c_plot = c_plot[idx]
 
                 # Get centers for each category
                 if x_centers is None:
@@ -862,28 +934,8 @@ class Plotter:
                 # Plot consolidated data
                 for cond_i, center in zip(include_cond, centers):
                     y = d_plot[cond_plot == cond_i]
-                    if y.size > 0:
-                        if plot_type.lower() == 'swarm':
-                            if max_pts is not None:
-                                y = np.random.permutation(y)[:max_pts]
-                            x = center*np.ones(y.shape[0])
-                            x, y = self._apply_swarm_spacing(x, y,
-                                                        s=s,
-                                                        r_factor=r_factor,
-                                                        order=order,
-                                                        xlim=xlim,
-                                                        ylim=ylim)
-                            self.ax.scatter(x, y, 
-                                            color=self.cmap(c),
-                                            s=s,
-                                            **kwargs)
-
-                        elif plot_type.lower() == 'box':
-                            self.ax.boxplot(y, 
-                                            positions=np.array([center]),
-                                            **kwargs)
-                        else:
-                            raise ValueError('Unknown scatter type \'{}\'.'.format(plot_type))
+                    c_y = c_plot[cond_plot == cond_i]
+                    _plot_data(y, c_y, center, xlim, ylim)
 
                 # Format axis
                 new_labels = [', '.join([str(p) for p in cond_params[key]]) for key in include_cond]
