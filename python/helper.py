@@ -1223,7 +1223,7 @@ class Tree:
             
         return tuple(index)
    
-    def generate_sample(self, seed=None, size=None, n=None, verbose=False):
+    def generate_sample(self, seed=None, size=None, subsize=None, verbose=False):
         """
         Generates a sample of the leaf nodes by randomly sampling, with
         replacement, at each level of the tree. Done many times, this is 
@@ -1233,22 +1233,34 @@ class Tree:
         - seed: Random seed for random number generator.
         - size: Total size of sample. If none, returns first subsample,
             regardless of size.
-        - n: Size of sampling at the leaf nodes. If None, all samples from
-            each leaf node are used.
-        - verbose: If True, notify user if leaf node has less than n samples.
+        - subsize: Size of sampling at each level. If None, the sampling size is equal
+            to the number of nodes in the original dataset at that level. If -1, then 
+            the level is sampled in its entirety without replacement (i.e. original data).
+        - verbose: If True, notify user if node has less than subsize samples.
 
         Returns:
         - sample: 1D array of sampled values.
         """
+        # Check overall size.
         if size is None:
             size = 1 # generate single subsample
+
+        # Check subsample size.
+        if subsize is None:
+            subsize = {}
+        elif not isinstance(subsize, dict):
+            subsize = {level: subsize for level in self.get_sublevels()}
+        elif any([k not in self.get_sublevels() for k in subsize.keys()]):
+            names = [k for k in subsize.keys() if k not in self.get_sublevels()]
+            warnings.warn('Unknown level(s) {}.'.format(names),
+                          category=RuntimeWarning)
         
         # Build sample until size requirement satisfied.
         sample = []
         rng = np.random.default_rng(seed=seed)
         while len(sample) < size:
             subsample = []
-            self._generate_sample(self, rng, subsample, n, verbose)
+            self._generate_sample(self, rng, subsample, subsize, verbose)
             subsample = np.hstack(subsample)
             sample = np.hstack([sample, subsample])
             
@@ -1264,27 +1276,85 @@ class Tree:
         return sample
     
     @staticmethod
-    def _generate_sample(tree, rng, sample, n, verbose=False):
+    def _generate_sample(tree, rng, sample, subsize, verbose=False):
         """Recursive method for traversing tree by sampling with replacement."""
         # Create random sample of children.
-        idx = rng.choice(np.arange(len(tree.children)), 
-                         size=len(tree.children),
-                         replace=True)
-
+        size = subsize.get(tree.get_next_level(), len(tree.children))
+        if len(tree.children) < size and verbose:
+            warnings.warn('Subsample size is larger than number of child nodes.',
+                          category=RuntimeWarning)
+        if size > 0 :
+            idx = rng.choice(np.arange(len(tree.children)), 
+                             size=size,
+                             replace=True)
+        elif size == -1:
+            idx = np.arange(len(tree.children))
+        else:
+            raise ValueError(f'Value of {size} not allowed for size parameter.')
+        
         if tree.penultimate:
             # If penultimate node, return sample of children values.
-            if n is None:
-                n = len(tree.children)
-            elif len(tree.children) < n and verbose:
-                print(RuntimeWarning('tree length'))
-            return tree.children[idx[:n]]
+            return tree.children[idx]
         else:
             # Otherwise, return values from traversing tree 
             # at each sampled child node.
             for i in idx:
-                s = Tree._generate_sample(tree.children[i], rng, sample, n, verbose)
+                s = Tree._generate_sample(tree.children[i], rng, sample, subsize, verbose)
                 if s is not None:
                     sample.append(s)
+
+    def get_next_level(self):
+        if len(self.children) > 0:
+            if self.penultimate:
+                return 'leaf'
+            else:
+                name = self.children[0].name
+                assert all([child.name ==  name for child in self.children])
+                return name
+        else:
+            return None
+
+    def get_sublevels(self):
+        return self._get_sublevels([])
+
+    def _get_sublevels(self, levels):
+        if len(self.children) > 0:
+            if self.penultimate:
+                name = 'leaf'
+            else:
+                name = self.children[0].name
+                assert all([child.name ==  name for child in self.children])
+
+            if name not in levels:
+               levels.append(name)
+
+        if not self.penultimate:
+            for child in self.children:
+                child._get_sublevels(levels)
+        
+        return levels
+
+    def get_level_counts(self):
+        counts = self._get_level_counts({})
+        return {k: np.array(v) for k, v in counts.items()}
+    
+    def _get_level_counts(self, counts):
+        if len(self.children) > 0:
+            if self.penultimate:
+                name = 'leaf'
+            else:
+                name = self.children[0].name
+                assert all([child.name ==  name for child in self.children])
+            
+            if name not in counts.keys():
+                counts[name] = []
+            counts[name].append(len(self.children))
+
+        if not self.penultimate:
+            for child in self.children:
+                child._get_level_counts(counts)
+            
+        return counts
 
 
 def make_tree(df, levels, init_value):
