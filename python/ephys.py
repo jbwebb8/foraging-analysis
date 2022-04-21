@@ -2152,7 +2152,25 @@ class LogGaussian(Gaussian):
     def __init__(self, **kwargs):
         """
         Creates log-Gaussian distribution, in which the log-transformed
-        data is fit to a (multivariate) normal distribution.
+        data is fit to a normal distribution. Note that the log-normal 
+        distribution essentially fits the parameters (mean, variance) to
+        log-transformed data, but then has a modified pdf due to the 
+        logarithmic transformation:
+
+        ln(X) = Y ~ N(mu, sigma**2)
+        f(x) = (1/x) f(ln(x))
+
+        that is, the pdf is obtained by treating the log-transformed data
+        as a normal distribution, with an additional scaling factor of (1/x).
+        For a multivariate distribution, this extends to prod_i(1/x_i). See
+        here for more details:
+        https://stats.stackexchange.com/a/296843/355903
+        https://stats.stackexchange.com/a/297559/355903
+        https://stats.stackexchange.com/q/65998/355903
+
+
+        Because the cdf integrates out these differences, there is no scaling
+        factor.
         """
         super().__init__(**kwargs)
         self._name = 'log-gaussian'
@@ -2175,6 +2193,27 @@ class LogGaussian(Gaussian):
             return X
         else:
             raise SyntaxError('Data shape of [' + ','.join([str(n) for n in X.shape]) + '] not understood.')
+
+    def _pdf(self, X):
+        """
+        Override pdf of normal distribution by applying (1/x) scaling factor.
+        """
+        # Format data (apply log-transformation)
+        X = self._format_data(X)
+        
+        # Get data shape.
+        N = X.shape[0] # number of samples
+        m = X.shape[1] # number of dimensions
+        
+        # Compute denominator and Sigma**-1
+        if self._den == None:
+            self._den = np.sqrt((2.0*np.pi)**m * np.linalg.det(self._Sigma))
+        if self._Sigma_inv is None:
+            self._Sigma_inv = np.linalg.inv(self._Sigma)
+        num = np.exp(-0.5*np.diag((X - self._mu).dot(self._Sigma_inv.dot((X - self._mu).T))))
+        
+        # Return pdf, noting that the scaling factor is prod_i(1/x_i).
+        return num / (np.prod(np.exp(X), axis=1)*self._den)
 
 
 ### Classification models ###
