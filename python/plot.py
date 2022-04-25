@@ -772,12 +772,12 @@ class Plotter:
                     y = y[idx]
                     c_y = c_y[idx]
                 x = center*np.ones(y.shape[0])
-                x, y = self._apply_swarm_spacing(x, y,
-                                            s=s,
-                                            r_factor=r_factor,
-                                            order=order,
-                                            xlim=xlim,
-                                            ylim=ylim)
+                x, y = self.apply_swarm_spacing(x, y,
+                                                s=s,
+                                                r_factor=r_factor,
+                                                order=order,
+                                                xlim=xlim,
+                                                ylim=ylim)
                 self.ax.scatter(x, y, 
                                 color=self.cmap(c_y),
                                 s=s,
@@ -954,12 +954,12 @@ class Plotter:
         self.ax.set_xticks(xticks_all)
         self.ax.set_xticklabels(xlabels_all, rotation=45, ha='right')
 
-    def _apply_swarm_spacing(self, x, y, 
-                             s=1.0, 
-                             r_factor=1.0, 
-                             order='ascending',
-                             xlim=None,
-                             ylim=None):
+    def apply_swarm_spacing(self, x, y, 
+                            s=1.0, 
+                            r_factor=1.0, 
+                            order='ascending',
+                            xlim=None,
+                            ylim=None):
         # Get axis limits based on dummy scatter plot if not provided
         if xlim is None or ylim is None:
             pts = self.ax.scatter(x, y, s=0.0)
@@ -988,12 +988,10 @@ class Plotter:
 
         # Next, iterate through points to determine new x-position
         for i in range(y.shape[0]):
-            #print(i)
             # Determine previous points that overlap with current position
             d = ((x[i] - x[:i])**2 + (y[i] - y[:i])**2)**0.5
             #idx = np.atleast_1d(np.argwhere(d < 2*r).squeeze())
-            idx = np.atleast_1d(np.argwhere(y[i] - y[:i] < 2*r).squeeze())
-            #print(idx)
+            idx = np.atleast_1d(np.argwhere(np.abs(y[i] - y[:i]) < 2*r).squeeze())
             
             if len(idx) > 0 and np.sum(d < 2*r) > 0:
                 # Find new candidates (x', y) for x-coordinate that place current point
@@ -1011,8 +1009,8 @@ class Plotter:
                 max_iters = 10 # max iterations in loop (k ~ 1.6)
                 for j in range(max_iters):
                     # Find new candidates
-                    x_new = np.hstack([ k*(4*(r**2) - (y[i] - y[idx]))**0.5 + x[idx],
-                                       -k*(4*(r**2) - (y[i] - y[idx]))**0.5 + x[idx]])
+                    x_new = np.hstack([ k*(4*(r**2) - (y[i] - y[idx])**2)**0.5 + x[idx],
+                                       -k*(4*(r**2) - (y[i] - y[idx])**2)**0.5 + x[idx]])
                     dx = x_new[np.newaxis, :] - x[idx, np.newaxis]
                     dy = y[np.newaxis, i] - y[idx, np.newaxis]
                     d = (dx**2 + dy**2)**0.5
@@ -1169,6 +1167,7 @@ class Plotter:
                           label=None,
                           bins=None,
                           center=None,
+                          pdf_scale=1.0,
                           hist_kwargs={},
                           dist_kwargs={}):
         # Check input data. Should be 1D vector.
@@ -1201,10 +1200,11 @@ class Plotter:
         # Plot fitted distribution.
         model.fit(x)
         t = np.linspace(x.min(), x.max(), num=1000)
-        self.ax.plot(t, model.pdf(t),
+        pdf = pdf_scale*model.pdf(t)
+        self.ax.plot(t, pdf,
                      color=self.cmap(c),
                      **dist_kwargs)
-        self.ax.fill_between(t, model.pdf(t),
+        self.ax.fill_between(t, pdf,
                              color=self.cmap(c),
                              alpha=0.3)
         
@@ -1213,12 +1213,13 @@ class Plotter:
             if center == 'mean':
                 x_center = x.mean()
             elif center == 'median':
-                x_center = x.median()
+                x_center = np.median(x)
             else:
                 raise ValueError('Unknown center \'{}\'.'.format(center))
-            self.ax.axvline(x_center,
-                            color=self.cmap(c),
-                            **dist_kwargs)
+            self.ax.vlines(x_center, ymin=0.0, 
+                          ymax=pdf_scale*model.pdf(np.array([x_center])),
+                          color=self.cmap(c),
+                          **dist_kwargs)
 
     def save_figure(self, filepath, ext='pdf', dpi=None):
         plt.savefig(filepath, format=ext, dpi=dpi)
