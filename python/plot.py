@@ -823,6 +823,11 @@ class Plotter:
             data = {'mouse': data}
             cond = {'mouse': cond}
             c    = {'mouse': c}
+
+        elif not isinstance(c, dict):
+            # Assume single number given.
+            c = {key: [c*np.ones(v.shape) for v in vals] 
+                 for key, vals in data.items()}
         
         # Plot combined data
         # Get consolidated data across animals

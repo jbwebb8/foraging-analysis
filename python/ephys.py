@@ -2317,11 +2317,14 @@ class LinearRegression(Model):
         
         # Compute components 
         # (see e.g. https://online.stat.psu.edu/stat462/node/95/)
-        y_hat = self.predict(X)
-        y_mean = np.mean(y, axis=0)
-        SSR = np.sum((y_hat - y_mean)**2) # regression sum of squares
-        SST = np.sum((y - y_mean)**2) # total sum of squares
-        return SSR/SST
+        if method == 'r_squared':
+            y_hat = self.predict(X)
+            y_mean = np.mean(y, axis=0)
+            SSR = np.sum((y_hat - y_mean)**2) # regression sum of squares
+            SST = np.sum((y - y_mean)**2) # total sum of squares
+            return SSR/SST
+        else:
+            raise ValueError('Unknown method \'{}\'.'.format(method))
 
 
 class KMeans(Model):
