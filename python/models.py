@@ -83,6 +83,9 @@ class ForagingModel:
     MAX_WAIT_TIME = 10.0 # maximum waiting time for reward if not modeled
 
     def __init__(self):
+        # Model name
+        self.name = 'base'
+
         # Placeholders for data and model parameters
         # Each item will be specific to a combination of animal ID and env ID:
         # data[(mouse_id, cond_id)] = vals
@@ -404,6 +407,61 @@ class ForagingModel:
     def _predict(self, **kwargs):
         raise NotImplementedError
 
+    def cross_validate(self, mouse_ids, 
+                       env_ids, K, 
+                       verbose=True, 
+                       fit_kwargs={}, 
+                       pred_kwargs={},
+                       return_data=[]):
+        if verbose:
+            print('Analyzing animal(s) {}... k = '.format(mouse_ids), end='')
+        
+        # Check inputs.
+        if not isinstance(return_data, list):
+            return_data = [return_data]
+
+        # Get current dataset parameters.
+        cache = {'mouse_ids': self._active_mice, 
+                 'env_ids': self._active_envs,
+                 'k': self._k,
+                 'index': getattr(self, '_test_index', None)}
+                 
+        # Placeholders
+        Y = []
+        Y_hat = []
+        ret = [[] for name in return_data]
+
+        # Iterate over cross-validation indices.
+        for k in range(K):
+            if verbose:
+                print('{}'.format(k), end=' ')
+            
+            # Fit to training subset
+            self.set_data(mouse_ids=mouse_ids, env_ids=env_ids, k=K, index=k)
+            self.fit(**fit_kwargs)
+
+            # Get test data and predictions.
+            y = self.unravel(self.test_data['dt_patch'],
+                             *[self.test_data[name] for name in return_data])
+            if len(return_data) > 0:
+                y, args = y
+                for i, arg in enumerate(args):
+                    ret[i].append(np.array(arg))
+            Y.append(np.array(y))
+            Y_hat.append(self.predict(**pred_kwargs))
+        
+        # Reset dataset to original if specified.
+        if cache['k'] > -1:
+            self.set_data(**cache)
+
+        if verbose:
+            print('done.')
+
+        if len(return_data) > 0:
+            return Y, Y_hat, tuple(ret)
+        else:
+            return Y, Y_hat
+
     def add_reward_times(self, t1, t2):
         t = self._patch_model.times(t=t1, s=t2, interevent=False)
         r = (self._V0*np.arange(1, t.shape[0]+1)/self.REWARD_VOLUME).astype(np.int64)
@@ -622,11 +680,13 @@ class HeuristicModel(ForagingModel):
     def __init__(self):
         """Placeholder class for any future updates to heuristic models."""
         super().__init__()
+        self.name = 'heuristic'
 
 
 class FixedTimeModel(HeuristicModel):
     def __init__(self):
         super().__init__()
+        self.name = 'dt_fixed'
 
         # Set data
         self._data_keys += ['dt_patch']
@@ -672,6 +732,7 @@ class RewardTimeModel(HeuristicModel):
 
     def __init__(self):
         super().__init__()
+        self.name = 'dt_reward'
 
         # Set data
         self._data_keys += ['t_motor_patch', 'dt_patch']
@@ -777,6 +838,7 @@ class RewardNumberModel(RewardTimeModel):
 
     def __init__(self):
         super().__init__()
+        self.name = 'n_reward'
 
         # Set data
         self._data_keys += ['n_rewards']
@@ -864,6 +926,7 @@ class TimeOnTaskModel(HeuristicModel):
 
     def __init__(self, model_type):
         super().__init__()
+        self.name = 'tot'
 
         # Set data
         self._data_keys += ['n_patch', 't_patch', 'dt_patch']
@@ -919,6 +982,7 @@ class MVTModel(ForagingModel):
 
     def __init__(self):
         super().__init__()
+        self.name = 'mvt'
 
         # Set data
         self._data_keys += ['dt_interpatch', 'dt_patch']
@@ -998,6 +1062,7 @@ class FittedMVTModel(MVTModel):
 
     def __init__(self):
         super().__init__()
+        self.name = 'mvt_fit'
 
         # Set params
         self._param_keys += [n + '_exp' for n in self.PARAM_NAMES]
@@ -1273,6 +1338,7 @@ class BayesianModel(ForagingModel):
 
     def __init__(self, N, ll_thresh, lhw_thresh):
         super().__init__()
+        self.name = 'bayes'
 
         # Set data
         self._data_keys += ['t_motor_patch', 'dt_patch', 'n_patch', 'dt_interpatch']
@@ -1577,6 +1643,7 @@ class FittedBayesianModel(BayesianModel):
 
     def __init__(self, N):
         super().__init__(N, None, None)
+        self.name = 'bayes_fit'
 
         # Set fitted params
         self._param_keys += ['tau_leave']
