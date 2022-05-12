@@ -6,6 +6,7 @@ import math
 import warnings
 import copy
 import util
+import itertools
 
 ### Waveform analysis ###
 def med_filt(x, n=3, ignore_nan=True):
@@ -840,8 +841,10 @@ def _hidden_process_MLE(t_k, t_bin, T, history, L):
                 return np.hstack(alpha_k)
             
             # Place dummy residence time for calculation.
-            if m == 1:
-                T = np.zeros([1])
+            # EDIT: This leads to a bug with the term np.sum(np.exp(-T/tau))
+            # incorrectly evaluated as 1 in code block with len(T) > 0.
+            #if m == 1:
+            #    T = np.zeros([1])
             
             # If all previous residence times equal, then can simplify to sum.
             if len(T) == 1:
@@ -1211,8 +1214,12 @@ class Tree:
         Returns values of node ancestry in specified order. Ignores
         parent values if None.
         """
+        # Allow for values to be tuples.
         index = [p.value for p in self.get_ancestry(order=order) 
                  if p is not None]
+        index = [val if isinstance(val, (tuple, list)) else [val]
+                 for val in index]
+        index = list(itertools.chain.from_iterable(index))
         
         if order == 'ascending':
             index.insert(0, self.value)
