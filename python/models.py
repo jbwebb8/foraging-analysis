@@ -447,7 +447,13 @@ class ForagingModel:
                 y, args = y
                 for i, arg in enumerate(args):
                     ret[i].append(np.array(arg))
-            Y.append(np.array(y))
+            y = np.array(y)
+            if self.index_data:
+                _, (index,) = self.unravel(self.test_data['dt_patch'],
+                                           self.test_data['index'])
+                y = y[index]
+                ret = [[a[index] for a in r] for r in ret]
+            Y.append(y)
             Y_hat.append(self.predict(**pred_kwargs))
         
         # Reset dataset to original if specified.
@@ -1336,7 +1342,7 @@ class BayesianModel(ForagingModel):
 
     DEFAULT_TAU_RANGE = np.append(np.geomspace(0.1, 1000.0, num=100), np.inf)
 
-    def __init__(self, N, ll_thresh, lhw_thresh):
+    def __init__(self, N):
         super().__init__()
         self.name = 'bayes'
 
@@ -1349,13 +1355,15 @@ class BayesianModel(ForagingModel):
 
         # Set model parameters
         self._N = N # number of previous patches to use
-        self._ll_thresh = ll_thresh # log-likelihood threshold for decision-making
-        self._lhw_thresh = lhw_thresh # likelihood peak width threshold for decision-making
 
         # Format data subsets
         self.index_data = True
 
-    def _fit(self, data, percentile=0.1):
+    def _fit(self, data, *,
+             ll_thresh,
+             lhw_thresh,
+             lam_thresh=None,
+             percentile=0.1):
         """
         Following the MVTModel class, fit only the estimated travel time.
         The decision parameters (ll_thresh and lam_thresh) are determined
@@ -1366,15 +1374,30 @@ class BayesianModel(ForagingModel):
         assigning the log-likelihood threshold for leaving (ll_thresh) based
         on the value at initialization. Note that this model requires all MVT
         parameters in the active environments (tau, track length) to be equal.
+
+        EDIT: Now, thresholds are provided in the fit function exclusively. Log-
+        likelihood and likelihood-width thresholds must be given, whereas the
+        Poisson-rate threshold may either be given or fit to optimal MVT time 
+        if lam_thresh is None. Further, each parameter may be either a single value
+        for all environments or a dictionary of environment-value pairs.
         """
-        # Ensure all MVT parameters equal in active environments.
-        if not (all([self.env_params[env_id]['tau'] == self.env_params[self._active_envs[0]]['tau'] 
-                    for env_id in self._active_envs]) 
-               and
-               all([self.env_params[env_id]['track'] == self.env_params[self._active_envs[0]]['track'] 
-                    for env_id in self._active_envs])):
+        # Ensure all MVT parameters equal in active environments if
+        # Poisson-rate threshold will be fit.
+        tau_equal = all([self.env_params[env_id]['tau'] == self.env_params[self._active_envs[0]]['tau'] 
+                          for env_id in self._active_envs])
+        track_equal = all([self.env_params[env_id]['track'] == self.env_params[self._active_envs[0]]['track'] 
+                           for env_id in self._active_envs])
+        if (lam_thresh is None) and not (track_equal and tau_equal):
            warnings.warn('Active environments have different MVT parameters.',
                          category=SyntaxWarning)
+
+        # Convert to dict if needed.
+        if not isinstance(ll_thresh, dict):
+            ll_thresh = {env_id: ll_thresh for env_id in self._active_envs}
+        if not isinstance(lhw_thresh, dict):
+            lhw_thresh = {env_id: lhw_thresh for env_id in self._active_envs}
+        if (not isinstance(lam_thresh, dict)) and (lam_thresh is not None):
+            lam_thresh = {env_id: lam_thresh for env_id in self._active_envs}
 
         # Estimate true travel time
         dt_interpatch, (index,) = self.unravel(data['dt_interpatch'], data['index'])
@@ -1389,25 +1412,29 @@ class BayesianModel(ForagingModel):
         # Find thresholds for each environment
         self._params[self._active_key]['lam_thresh'] = {}
         self._params[self._active_key]['ll_thresh'] = {} # keep formatting consistent
+        self._params[self._active_key]['lhw_thresh'] = {}
         for env_id in self._active_envs:
-            # Get environment parameters
-            self.set_environment(env_id)
-            r_0 = self._V0*self._lambda0
-            tau = self._tau
-            t_t = self._params[self._active_key]['dt_est']
+            if lam_thresh is None:
+                # Get environment parameters
+                self.set_environment(env_id)
+                r_0 = self._V0*self._lambda0
+                tau = self._tau
+                t_t = self._params[self._active_key]['dt_est']
 
-            # Find Poisson rate at optimal residence time
-            t_opt, _ = helper.get_optimal_values(t_t=t_t, 
-                                                 R_0=0.0, 
-                                                 r_0=r_0, 
-                                                 tau=tau, 
-                                                 multipatch=False)
-            lam_opt = self._patch_model.lam(t_opt.squeeze())
+                # Find Poisson rate at optimal residence time
+                t_opt, _ = helper.get_optimal_values(t_t=t_t, 
+                                                    R_0=0.0, 
+                                                    r_0=r_0, 
+                                                    tau=tau, 
+                                                    multipatch=False)
+                lam = self._patch_model.lam(t_opt.squeeze())
+            else:
+                lam = lam_thresh[env_id]
 
             # Add threshold to model parameters
-            self._params[self._active_key]['lam_thresh'][env_id] = lam_opt
-            self._params[self._active_key]['ll_thresh'][env_id] = self._ll_thresh
-            self._params[self._active_key]['lhw_thresh'][env_id] = self._lhw_thresh
+            self._params[self._active_key]['lam_thresh'][env_id] = lam
+            self._params[self._active_key]['ll_thresh'][env_id] = ll_thresh[env_id]
+            self._params[self._active_key]['lhw_thresh'][env_id] = lhw_thresh[env_id]
 
     def _get_patch_indices(self, n_patch, index, error=True):
         # Get indices corresponding to patches to analyze.
@@ -1642,7 +1669,7 @@ class FittedBayesianModel(BayesianModel):
     PARAM_NAMES = ['lam_thresh', 'll_thresh', 'lhw_thresh'] # params to fit
 
     def __init__(self, N):
-        super().__init__(N, None, None)
+        super().__init__(N)
         self.name = 'bayes_fit'
 
         # Set fitted params
@@ -1681,7 +1708,7 @@ class FittedBayesianModel(BayesianModel):
         # Check environment
         if (not constrain) and (len(self._active_envs) > 1):
             warnings.warn('Unconstrained fitting with multiple environments'
-                          + ' may results in suboptimal fitting.',
+                          + ' may result in suboptimal fitting.',
                           category=SyntaxWarning)
 
         # Leave data in list-of-sessions format
