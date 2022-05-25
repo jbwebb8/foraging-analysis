@@ -114,11 +114,11 @@ class Session:
         else:
             self.vars = {}
 
-    def _check_attributes(self, data_names=None, var_names=None):
+    def _check_attributes(self, data_names=None, var_names=None, **kwargs):
         if data_names is not None:
             self.load_data(data_names)
         if var_names is not None:
-            self.load_vars(var_names)
+            self.load_vars(var_names, **kwargs)
         if self.vars.get('t_stop', 1.0) <= 0.0:
             raise UserWarning('Unanalyzable session: not enough patches.')
 
@@ -260,7 +260,11 @@ class Session:
         else:
             raise ValueError('Name \'%s\' not recognized.' % var_name)
     
-    def _get_event_times_per_patch(self, var_name, relative=False, return_index=False, pad=0.5):
+    def _get_event_times_per_patch(self, 
+                                   var_name, 
+                                   relative=False, 
+                                   return_indices=False, 
+                                   pad=0.5):
         """
         Returns list of event times for each patch, 
         such as motor or lick events.
@@ -270,27 +274,32 @@ class Session:
         self._check_attributes(var_names=req_vars)
 
         # Find patches in which events occurred
-        _, idx_patch = in_interval(self.vars[var_name],
+        t_var = np.copy(self.vars[var_name])
+        _, idx_patch = in_interval(t_var,
                                    self.vars['t_patch'][:, 0]-pad,
                                    self.vars['t_patch'][:, 1]+pad,
                                    query='event_interval')
-        n_patch = in_interval(self.vars[var_name],
+        n_patch = in_interval(t_var,
                               self.vars['t_patch'][:, 0]-pad,
                               self.vars['t_patch'][:, 1]+pad,
                               query='event')
         if var_name == 't_motor' and (n_patch > 1).any():
             raise UserWarning('Motor times cannot be uniquely assigned'
                               ' to individual patches.')
+        if np.sum(n_patch == 0) > 0:
+            t_var = t_var[n_patch > 0]
+            warnings.warn('Some events occurred outside of patches. Ignoring...',
+                          category=UserWarning)
         
         # Create list of event times
         t_event = []
         for i in range(self.n_patches):
-            t_event.append(self.vars[var_name][idx_patch == i] 
+            t_event.append(t_var[idx_patch == i] 
                            - int(relative)*self.vars['t_patch'][i, 0])
         
         # Return results
-        if return_index:
-            return t_event, idx_patch
+        if return_indices:
+            return t_event, idx_patch, (n_patch > 0)
         else:
             return t_event
 
@@ -309,17 +318,17 @@ class Session:
 
         return is_on, idx_on_start, idx_on_end
 
-    def get_lick_times(self, per_patch=False, relative=False):
+    def get_lick_times(self, per_patch=False, relative=False, thresh=None):
         # Requirements
         req_vars = ['t_lick']
-        self._check_attributes(var_names=req_vars)
+        self._check_attributes(var_names=req_vars, thresh=thresh)
 
         if per_patch:
             return self._get_event_times_per_patch('t_lick', relative=relative, pad=0.5)
         else:
             return self.vars['t_lick']
     
-    def _get_lick_times(self):
+    def _get_lick_times(self, thresh=None):
         # Requirements
         req_data = ['lick', 'fs']
         req_vars = ['t_stop']
@@ -328,7 +337,8 @@ class Session:
         # Find lick timestamps
         idx_stop = int(self.vars['t_stop'] * self.data['fs'])
         lick = self.data['lick'][:idx_stop]
-        thresh = np.max(lick) / 2.0
+        if thresh is None:
+            thresh = np.max(lick) / 2.0
         idx_licking = (lick > thresh).astype(np.int32)
         idx_lick = (np.argwhere((idx_licking - np.roll(idx_licking, -1)) == -1) + 1).flatten()
         t_lick = idx_lick / self.data['fs']
@@ -386,7 +396,9 @@ class Session:
             #r_motor = lambda dt: m*dt - m*np.max(self.vars['dt_motor']) + np.max(r_log)
 
             # Find patches in which rewards given
-            _, idx_patch = self._get_event_times_per_patch('t_motor', return_index=True)
+            _, idx_patch, idx_keep = \
+                self._get_event_times_per_patch('t_motor', return_indices=True)
+            r_log = r_log[idx_keep] # ignore events outside patches (e.g. technical error)
 
             # Calculate observed reward per patch
             r_patch_obs = np.zeros(self.vars['t_patch'].shape[0])
@@ -515,7 +527,7 @@ class TTSession(Session):
         elif name == 't_os':
             return self.raw_data[:, self.params['Data']['ComputerTime']]
 
-    def _load_var(self, name):
+    def _load_var(self, name, **kwargs):
         if name == 'T':
             return self.raw_data.shape[0]
         elif name in ['t_patch', 'in_patch', 't_stop']:
@@ -523,7 +535,7 @@ class TTSession(Session):
         elif name in ['t_motor', 'dt_motor', 'n_motor_rem', 't_motor_all']:
             return self._get_motor_times(name)
         elif name == 't_lick':
-            return self._get_lick_times()
+            return self._get_lick_times(**kwargs)
         else:
             raise SyntaxError('Unknown variable name \'%s\'.' % name)
     
