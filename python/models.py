@@ -826,7 +826,7 @@ class RewardTimeModel(HeuristicModel):
                 while (t - t_start) < dt:
                     t_start = t
                     if iters == 0:
-                        t = self.get_expected_wait_time(N-N0, t_start)
+                        t = self.get_expected_wait_time(N-N0, t_p)
                     else:
                         t = self.get_expected_wait_time(N, t_start)
                     iters += 1
@@ -918,7 +918,7 @@ class RewardNumberModel(RewardTimeModel):
                     N0 = self.estimate_unobserved_events(N, t_start, t_p-t_start)
                 except ValueError:
                     print(N, t_start, t_p, env_id, n_i, t_m)
-                t_hat[i] = self.get_expected_wait_time(N-N0, t_start)
+                t_hat[i] = self.get_expected_wait_time(N-N0, t_p)
 
             # Otherwise, take time of nth reward
             else:
