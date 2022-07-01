@@ -865,11 +865,20 @@ class RewardNumberModel(RewardTimeModel):
 
         return n_rewards
 
-    def _predict(self, *, t_motor_patch=None, dt_patch=None, env_ids=None, method='mean'):
+    def _predict(self, *, 
+                 t_motor_patch=None, 
+                 dt_patch=None, 
+                 env_ids=None, 
+                 method='mean',
+                 delay=None):
         # Get parameters
-        dt = self._params[self._active_key]['dt_' + method]
-        std = self._params[self._active_key]['dt_std']
         n = self._params[self._active_key]['n_' + method]
+        if delay is None:
+            dt = 0.0
+        elif isinstance(delay, str):
+            dt = self._params[self._active_key]['dt_' + delay]
+        else:
+            dt = float(delay)
 
         # Get test data
         if t_motor_patch is None:
@@ -918,11 +927,11 @@ class RewardNumberModel(RewardTimeModel):
                     N0 = self.estimate_unobserved_events(N, t_start, t_p-t_start)
                 except ValueError:
                     print(N, t_start, t_p, env_id, n_i, t_m)
-                t_hat[i] = self.get_expected_wait_time(N-N0, t_p)
+                t_hat[i] = self.get_expected_wait_time(N-N0, t_p) + dt
 
             # Otherwise, take time of nth reward
             else:
-                t_hat[i] = t_m[n_i-1]
+                t_hat[i] = t_m[n_i-1] + dt
 
         return t_hat
 
@@ -1352,6 +1361,7 @@ class BayesianModel(ForagingModel):
         # Set fitted params
         self._param_keys += ['dt_est']
         self._param_keys += ['lam_thresh', 'll_thresh', 'lhw_thresh']
+        self._param_keys += ['p_lam0', 'p_tau'] # priors
 
         # Set model parameters
         self._N = N # number of previous patches to use
@@ -1360,9 +1370,11 @@ class BayesianModel(ForagingModel):
         self.index_data = True
 
     def _fit(self, data, *,
-             ll_thresh,
-             lhw_thresh,
+             ll_thresh=None,
+             lhw_thresh=None,
              lam_thresh=None,
+             p_lam0=None,
+             p_tau=None,
              percentile=0.1):
         """
         Following the MVTModel class, fit only the estimated travel time.
@@ -1436,9 +1448,23 @@ class BayesianModel(ForagingModel):
             self._params[self._active_key]['ll_thresh'][env_id] = ll_thresh[env_id]
             self._params[self._active_key]['lhw_thresh'][env_id] = lhw_thresh[env_id]
 
-    def _get_patch_indices(self, n_patch, index, error=True):
+        # Add priors.
+        if p_lam0 is None:
+            p_lam0 = (1, 0)
+        if (not isinstance(p_lam0, dict)):
+            p_lam0 = {env_id: p_lam0 for env_id in self._active_envs}
+        self._params[self._active_key]['p_lam0'] = p_lam0
+        if p_tau is None:
+            p_tau = (1, 0)
+        if (not isinstance(p_tau, dict)):
+            p_tau = {env_id: p_tau for env_id in self._active_envs}
+        self._params[self._active_key]['p_tau'] = p_tau
+
+    def _get_patch_indices(self, n_patch, index, error=True, alt=False):
         # Get indices corresponding to patches to analyze.
-        n_model = np.arange(max(n_patch[index]-self._N, 0), n_patch[index]+1)
+        n_model = np.arange(max(n_patch[index]-(1+int(alt))*self._N, 0), 
+                            n_patch[index]+1,
+                            1+int(alt))
         idx = np.argwhere(n_patch[np.newaxis, :] == n_model[:, np.newaxis])
         if idx.shape[0] < n_model.shape[0]:
             if error:
@@ -1509,6 +1535,10 @@ class BayesianModel(ForagingModel):
             self.set_environment(env_id)
             L = int(self.REWARD_VOLUME/self._V0)
 
+            # Get associated priors.
+            p_lam0 = self.params['p_lam0'][env_id]
+            p_tau = self.params['p_tau'][env_id]
+
             # Iterate over patches within session
             i_p = np.nonzero(index)[0]
             t_hat.append(np.ones([len(i_p)])*np.nan)
@@ -1533,11 +1563,12 @@ class BayesianModel(ForagingModel):
                 
                 # Iterate over each time bin.
                 if filt is None: # without filter, can stop when criteria met
-                    iters = t_bin
+                    t_iters = t_bin
                 else: # with filter, must retrieve estimates at all time points first
-                    iters = [t_bin]
-                for k, t in enumerate(iters):
+                    t_iters = [t_bin]
+                for k, t in enumerate(t_iters):
                     t_b = np.insert(np.array(t), 0, 0.0)
+                    crit = []
                     with np.errstate(divide='raise'):
                         # Compute MLE for Poisson parameters.
                         lam_MLE, tau_MLE = helper.estimate_parameters(t_k, 
@@ -1545,63 +1576,92 @@ class BayesianModel(ForagingModel):
                                                                       L=L,
                                                                       T=T,
                                                                       model='hidden', 
-                                                                      history='consecutive')
-                        
-                        # Compute log-likelihood for MLE.
-                        ll = helper.estimate_log_likelihood(t_k,
-                                                            t_b,
-                                                            L=L,
-                                                            T=T,
-                                                            lam=lam_MLE,
-                                                            tau=tau_MLE,
-                                                            model='hidden', 
-                                                            history='consecutive', 
-                                                            epsilon=0.1)
-                        ll /= np.sum(T[:-1]) + t # normalize LL by total time of model
+                                                                      history='consecutive',
+                                                                      p_lam0=p_lam0,
+                                                                      p_tau=p_tau)
 
-                    # Compute log-likelihood across range of values.
-                    lam_range = helper.calculate_parameters(t_k,
-                                                            t_b,
-                                                            L=L,
-                                                            T=T,
-                                                            lam=None,
-                                                            tau=tau_range,
-                                                            model='hidden', 
-                                                            history='consecutive')
-                    #lam_range = lam_range[:, 0] # remove time axis
-                    lh = np.ones([len(tau_range), len(t_b)-1])*np.nan
-                    for l in range(len(tau_range)):
-                        bc = np.ones([len(t_b)-1]) # array for broadcasting
-                        lh[l] = helper.estimate_log_likelihood(t_k,
-                                                               t_b,
-                                                               L=L,
-                                                               T=T,
-                                                               lam=lam_range[l]*bc,
-                                                               tau=tau_range[l]*bc,
-                                                               model='hidden', 
-                                                               history='consecutive', 
-                                                               epsilon=0.1)
-                    # Estimate peak widths at each time point.
-                    # (Unfortunately, this is a difficult method to vectorize.)
-                    lhw = np.ones([len(t_b)-1])
-                    for l, t in enumerate(t_b[1:]):
-                        lhw[l] = self.FWHM(lam_range[:, l], np.exp(lh[:, l]))
-                    assert np.sum(lhw < 0.0) == 0
+                        # Check criterion for Poisson rate.
+                        if filt is not None:
+                            lam_MLE = filt(lam_MLE)
+                        crit.append(lam_MLE <= self.params['lam_thresh'][env_id])
+                        
+                        # Check criterion for log-likelihood.
+                        if self.params['ll_thresh'][env_id] is not None:
+                            # Compute log-likelihood for MLE.
+                            ll = helper.estimate_log_likelihood(t_k,
+                                                                t_b,
+                                                                L=L,
+                                                                T=T,
+                                                                lam=lam_MLE,
+                                                                tau=tau_MLE,
+                                                                model='hidden', 
+                                                                history='consecutive',
+                                                                p_lam0=p_lam0,
+                                                                p_tau=p_tau,
+                                                                epsilon=0.1)
+                            ll /= np.sum(T[:-1]) + t # normalize LL by total time of model
+
+                            # Check if criterion met.
+                            if filt is not None:
+                                ll = filt(ll)
+                            crit.append(ll >= self.params['ll_thresh'][env_id])
+                        
+                        else:
+                            crit.append(np.ones([len(t_b)-1], dtype=bool))
+                            
+                        # Check criterion for log-likelihood width.
+                        if self.params['lhw_thresh'][env_id] is not None:
+                            # Compute log-likelihood across range of values.
+                            lam_range = helper.calculate_parameters(t_k,
+                                                                    t_b,
+                                                                    L=L,
+                                                                    T=T,
+                                                                    lam=None,
+                                                                    tau=tau_range,
+                                                                    model='hidden', 
+                                                                    history='consecutive',
+                                                                    p_lam0=p_lam0,
+                                                                    p_tau=p_tau)
+                            #lam_range = lam_range[:, 0] # remove time axis
+                            lh = np.ones([len(tau_range), len(t_b)-1])*np.nan
+                            for l in range(len(tau_range)):
+                                bc = np.ones([len(t_b)-1]) # array for broadcasting
+                                lh[l] = helper.estimate_log_likelihood(t_k,
+                                                                    t_b,
+                                                                    L=L,
+                                                                    T=T,
+                                                                    lam=lam_range[l]*bc,
+                                                                    tau=tau_range[l]*bc,
+                                                                    model='hidden', 
+                                                                    history='consecutive',
+                                                                    p_lam0=p_lam0,
+                                                                    p_tau=p_tau,
+                                                                    epsilon=0.1)
+                            
+                            # Estimate peak widths at each time point.
+                            # (Unfortunately, this is a difficult method to vectorize.)
+                            lhw = np.ones([len(t_b)-1])
+                            for l, t in enumerate(t_b[1:]):
+                                lhw[l] = self.FWHM(lam_range[:, l], np.exp(lh[:, l]))
+                            assert np.sum(lhw < 0.0) == 0
+
+                            # Check if criterion met.
+                            if filt is not None:
+                                lhw = filt(lhw)
+                            crit.append(lhw >= self.params['lhw_thresh'][env_id])
+
+                        else:
+                            crit.append(np.ones([len(t_b)-1], dtype=bool))
                     
                     # Determine if criteria for patch-leaving decision are met.
                     # Note that we do not need to scale lam_MLE by L because 
                     # lam_opt is already scaled by L in patch_model.lam.
                     if filt is None:
-                        if ((lam_MLE <= self.params['lam_thresh'][env_id]) 
-                            and (ll >= self.params['ll_thresh'][env_id])
-                            and (lhw <= self.params['lhw_thresh'][env_id])):
+                        if all(crit):
                             t_hat[-1][j] = t
                             break
                     else:
-                        crit = (filt(lam_MLE) <= self.params['lam_thresh'][env_id],
-                                filt(ll) >= self.params['ll_thresh'][env_id],
-                                filt(lhw) <= self.params['lhw_thresh'][env_id])
-                        crit = np.logical_and.reduce(crit, axis=0)
+                        crit = np.logical_and.reduce(tuple(crit), axis=0)
                         if np.sum(crit) > 0:
                             t_hat[-1][j] = t_bin[np.nonzero(crit)[0][0]]
         
