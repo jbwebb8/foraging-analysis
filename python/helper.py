@@ -615,7 +615,13 @@ def _get_optimal_values_multi_type(*, t_p=None,
     else:
         return opt, R_opt
 
-def estimate_parameters(t_k, t_bin, T=None, model='full', history='equal', L=1):
+def estimate_parameters(t_k, t_bin,
+                        T=None, 
+                        model='full', 
+                        history='equal', 
+                        L=1,
+                        p_lam0=(1,0),
+                        p_tau=(1,0)):
     """
     Estimate parameters (lam_0, tau) of non-homogeneous Poisson process
     given event times t_k.
@@ -660,6 +666,8 @@ def estimate_parameters(t_k, t_bin, T=None, model='full', history='equal', L=1):
         raise ValueError('Time bins must start at 0.0')
     if t_bin[-2] > T[-1]:
         raise ValueError('Time bins must not exceed last residence time.')
+    if len(p_lam0) != len(p_tau) != 2:
+        raise SyntaxError('Parameter priors must be tuples of length 2.')
         
     # Drop last (current) residence time if using previous patch sequences.
     # If using only current sequence, variable T is cancelled out by (m-1)
@@ -670,11 +678,16 @@ def estimate_parameters(t_k, t_bin, T=None, model='full', history='equal', L=1):
     if model.lower() == 'full':
         return _full_process_MLE(t_k, t_bin, T, history)
     elif model.lower() == 'hidden':
-        return _hidden_process_MLE(t_k, t_bin, T, history, L)
+        return _hidden_process_MLE(t_k, t_bin, T, history, L, p_lam0, p_tau)
     else:
         raise ValueError('Unknown model type \'{}\''.format(model))
         
 def _full_process_MLE(t_k, t_bin, T, history):
+    # NOTE: Function no longer maintained!
+    warnings.warn('This function is no longer maintained and does not use priors.'
+                  + ' Use _hidden_process_MLE with L=1 instead.',
+                  category=DeprecationWarning)
+            
     # Variables
     m = len(t_k)
     tau_MLE = np.zeros([len(t_bin)-1])
@@ -772,11 +785,16 @@ def _full_process_MLE(t_k, t_bin, T, history):
         
     return (lam_MLE, tau_MLE)
 
-def _hidden_process_MLE(t_k, t_bin, T, history, L):
+def _hidden_process_MLE(t_k, t_bin, T, history, L,
+                        p_lam0=(1,0), p_tau=(1,0)):
     # Variables
     m = len(t_k)
     tau_MLE = np.zeros([len(t_bin)-1])
     lam_MLE = np.zeros([len(t_bin)-1])
+
+    # Get priors on estimated parameters.
+    alpha_1, beta_1 = p_lam0
+    alpha_2, beta_2 = p_tau
     
     # Calculate MLE at each time point
     for i, t in enumerate(t_bin[1:]):
@@ -786,35 +804,17 @@ def _hidden_process_MLE(t_k, t_bin, T, history, L):
             t_sum = np.sum(t_k_[t_k_ <= t])
             K = np.sum(np.hstack(t_k) <= t)
 
-            def alpha_k(tau):
-                alpha = lambda t1, t2: (t1*np.exp(-t1/tau) - t2*np.exp(-t2/tau))/(np.exp(-t1/tau) - np.exp(-t2/tau))
-                alpha_k = []
+            # Define function over reward segments.
+            def phi_k(tau):
+                phi = lambda t1, t2: (t1*np.exp(-t1/tau) - t2*np.exp(-t2/tau))/(np.exp(-t1/tau) - np.exp(-t2/tau))
+                phi_k = []
                 for t_k_ in t_k:
                     t_k_t = np.insert(t_k_[t_k_ <= t], 0, 0.0)
-                    alpha_k.append(alpha(t_k_t[:-1], t_k_t[1:]))
-                return np.hstack(alpha_k)
+                    phi_k.append(phi(t_k_t[:-1], t_k_t[1:]))
+                return np.hstack(phi_k)
 
-            # Define function
-            f = lambda tau: ( (K*tau - t_sum - (L-1)*np.sum(alpha_k(tau)))
-                              *(np.exp(t/tau) - 1.0)/t
-                              - L*K
-                            ) 
-            tau_init = 0.1
-
-            # Find MLE of tau
-            if K > 0: # avoid trivial equation
-                try:
-                    tau_MLE[i] = brentq(f, tau_init, 1e6)
-                except ValueError:
-                    tau_MLE[i] = math.inf
-            else:
-                tau_MLE[i] = math.inf
-
-            # Find corresponding MLE of lambda
-            if tau_MLE[i] < math.inf:
-                lam_MLE[i] = (1.0/m)*(L*K)/(tau_MLE[i]*(np.exp(t/tau_MLE[i]) - 1.0))
-            else:
-                lam_MLE[i] = (1.0/m)*L*K/t
+            # Set previous residence times to t.
+            T = t
         
         elif history == 'consecutive':
             # Calculate variables
@@ -830,15 +830,16 @@ def _hidden_process_MLE(t_k, t_bin, T, history, L):
             t_sum = np.sum(t_k_)
             K = K_ + K_m
             
-            def alpha_k(tau):
-                alpha = lambda t1, t2: (t1*np.exp(-t1/tau) - t2*np.exp(-t2/tau))/(np.exp(-t1/tau) - np.exp(-t2/tau))
-                alpha_k = []
+            # Define function over reward segments.
+            def phi_k(tau):
+                phi = lambda t1, t2: (t1*np.exp(-t1/tau) - t2*np.exp(-t2/tau))/(np.exp(-t1/tau) - np.exp(-t2/tau))
+                phi_k = []
                 for t_k_ in t_k[:-1]:
                     t_k_t = np.insert(t_k_, 0, 0.0)
-                    alpha_k.append(alpha(t_k_t[:-1], t_k_t[1:]))
+                    phi_k.append(phi(t_k_t[:-1], t_k_t[1:]))
                 t_k_t = np.insert(t_k[-1][t_k[-1] <= t], 0, 0.0)
-                alpha_k.append(alpha(t_k_t[:-1], t_k_t[1:]))
-                return np.hstack(alpha_k)
+                phi_k.append(phi(t_k_t[:-1], t_k_t[1:]))
+                return np.hstack(phi_k)
             
             # Place dummy residence time for calculation.
             # EDIT: This leads to a bug with the term np.sum(np.exp(-T/tau))
@@ -846,64 +847,66 @@ def _hidden_process_MLE(t_k, t_bin, T, history, L):
             #if m == 1:
             #    T = np.zeros([1])
             
-            # If all previous residence times equal, then can simplify to sum.
-            if len(T) == 1:
-                # Define function
-                f = lambda tau: ( (K*tau - t_sum - (L-1)*np.sum(alpha_k(tau)))
-                                  *(m - (m-1)*np.exp(-T/tau) - np.exp(-t/tau))
-                                  /((m-1)*T*np.exp(-T/tau) + t*np.exp(-t/tau))
-                                  - L*K
-                                )
-                tau_init = 0.1
+        # If all previous residence times equal, then can simplify to sum.
+        if len(T) == 1:
+            # Define function
+            f = lambda tau: ( ((K+alpha_1-1)*tau - t_sum - (L-1)*np.sum(phi_k(tau))
+                                - (alpha_2-1)*tau + beta_2*tau**2)
+                                *(m - (m-1)*np.exp(-T/tau) - np.exp(-t/tau) + beta_1/tau)
+                                /((m-1)*T*np.exp(-T/tau) + t*np.exp(-t/tau) + beta_1)
+                                - (L*K + alpha_1 - 1)
+                            )
+            tau_init = 0.1
 
-                # Find MLE of tau
-                if K > 0: # avoid trivial equation
-                    try:
-                        tau_MLE[i] = brentq(f, tau_init, 1e6)
-                    except ValueError:
-                        tau_MLE[i] = math.inf
-                else:
+            # Find MLE of tau
+            if K > 0: # avoid trivial equation
+                try:
+                    tau_MLE[i] = brentq(f, tau_init, 1e6)
+                except ValueError:
                     tau_MLE[i] = math.inf
-
-                # Find corresponding MLE of lambda
-                if tau_MLE[i] < math.inf:
-                    lam_MLE[i] = ( (L*K*np.exp(-t/tau_MLE[i]))
-                                   /(tau_MLE[i]*(m - (m-1)*np.exp(-T/tau_MLE[i]) - np.exp(-t/tau_MLE[i])))
-                                 ) 
-                else:
-                    lam_MLE[i] = L*K/((m-1)*T + t)
-            
-            # Otherwise, must compute sum of exponential terms.
             else:
-                # Define function
-                f = lambda tau: ( (K*tau - t_sum - (L-1)*np.sum(alpha_k(tau)))
-                                  *(m - np.sum(np.exp(-T/tau)) - np.exp(-t/tau))
-                                  /(np.sum(T*np.exp(-T/tau)) + t*np.exp(-t/tau))
-                                  - L*K
-                                )
-                a = 0.1
-                b_range = np.geomspace(0.5, 1e6, 50)
+                tau_MLE[i] = math.inf
 
-                # Find MLE of tau
-                success = False
-                if K > 0: # avoid trivial equation
-                    for b in b_range:
-                        try:
-                            tau_MLE[i] = brentq(f, a, b)
-                            success = True
-                            break
-                        except ValueError:
-                            continue
-                if not success:
-                    tau_MLE[i] = math.inf
+            # Find corresponding MLE of lambda
+            if tau_MLE[i] < math.inf:
+                lam_MLE[i] = ( ((L*K + alpha_1 - 1)*np.exp(-t/tau_MLE[i]))
+                                /(tau_MLE[i]*(m - (m-1)*np.exp(-T/tau_MLE[i]) - np.exp(-t/tau_MLE[i])) + beta_1)
+                                ) 
+            else:
+                lam_MLE[i] = (L*K + alpha_1 - 1)/((m-1)*T + t + beta_1)
+        
+        # Otherwise, must compute sum of exponential terms.
+        else:
+            # Define function
+            f = lambda tau: ( ((K+alpha_1-1)*tau - t_sum - (L-1)*np.sum(phi_k(tau))
+                                - (alpha_2-1)*tau + beta_2*tau**2)
+                                *(m - np.sum(np.exp(-T/tau)) - np.exp(-t/tau) + beta_1/tau)
+                                /(np.sum(T*np.exp(-T/tau)) + t*np.exp(-t/tau) + beta_1)
+                                - (L*K + alpha_1 - 1)
+                            )
+            a = 0.1
+            b_range = np.geomspace(0.5, 1e6, 50)
 
-                # Find corresponding MLE of lambda
-                if tau_MLE[i] < math.inf:
-                    lam_MLE[i] = ( (L*K*np.exp(-t/tau_MLE[i]))
-                                   /(tau_MLE[i]*(m - np.sum(np.exp(-T/tau_MLE[i])) - np.exp(-t/tau_MLE[i])))
-                                 ) 
-                else:
-                    lam_MLE[i] = L*K/(np.sum(T) + t)
+            # Find MLE of tau
+            success = False
+            if K > 0: # avoid trivial equation
+                for b in b_range:
+                    try:
+                        tau_MLE[i] = brentq(f, a, b)
+                        success = True
+                        break
+                    except ValueError:
+                        continue
+            if not success:
+                tau_MLE[i] = math.inf
+
+            # Find corresponding MLE of lambda
+            if tau_MLE[i] < math.inf:
+                lam_MLE[i] = ( ((L*K + alpha_1 - 1)*np.exp(-t/tau_MLE[i]))
+                                /(tau_MLE[i]*(m - np.sum(np.exp(-T/tau_MLE[i])) - np.exp(-t/tau_MLE[i])) + beta_1)
+                             ) 
+            else:
+                lam_MLE[i] = (L*K + alpha_1 - 1)/(np.sum(T) + t + beta_1)
         
     return (lam_MLE, tau_MLE)
 
@@ -915,6 +918,8 @@ def estimate_log_likelihood(t_k,
                             model='full', 
                             history='equal', 
                             L=1,
+                            p_lam0=(1,0),
+                            p_tau=(1,0),
                             epsilon=0.1):
     # Check parameters
     if history not in ['equal', 'consecutive']:
@@ -943,11 +948,17 @@ def estimate_log_likelihood(t_k,
     if model.lower() == 'full':
         return _full_process_LL(t_k, t_bin, T, lam, tau, history)
     elif model.lower() == 'hidden':
-        return _hidden_process_LL(t_k, t_bin, T, lam, tau, history, L, epsilon)
+        return _hidden_process_LL(t_k, t_bin, T, lam, tau, history, L,
+                                  p_lam0, p_tau, epsilon)
     else:
         raise ValueError('Unknown model type \'{}\''.format(model))
 
 def _full_process_LL(t_k, t_bin, T, lam, tau, history):
+    # NOTE: Function no longer maintained!
+    warnings.warn('This function is no longer maintained and does not use priors.'
+                  + ' Use _hidden_process_LL with L=1 instead.',
+                  category=DeprecationWarning)
+
     # Variables
     m = len(t_k)
     logp = np.zeros([len(t_bin)-1])
@@ -1019,7 +1030,10 @@ def _full_process_LL(t_k, t_bin, T, lam, tau, history):
 
     return logp
         
-def _hidden_process_LL(t_k, t_bin, T, lam, tau, history, L, epsilon=0.1):
+def _hidden_process_LL(t_k, t_bin, T, lam, tau, history, L,
+                       p_lam0=(1,0),
+                       p_tau=(1,0),
+                       epsilon=0.1):
     # Variables
     m = len(t_k) # number of sequences observed
     logp = np.zeros([len(t_bin)-1])
@@ -1089,6 +1103,12 @@ def _hidden_process_LL(t_k, t_bin, T, lam, tau, history, L, epsilon=0.1):
         ll += (L-1)*np.sum(np.log(Lam_n(tau[i], lam_0, t_k_))) # Lambda(t_n-1, t_n)
         ll -= K*(np.log(special.factorial(L-1))) 
         ll += K*np.log(lam_0) - t_sum/tau[i] + K*np.log(epsilon) # lambda(t)
+
+        # Compute prior components.
+        for (alpha, beta), val in zip([p_lam0, p_tau], [lam_0, tau[i]]):
+            if np.isfinite(val):
+                ll += (alpha-1)*np.log(val) - beta*val # value-dependent components
+            ll += alpha*np.log(beta) - np.log(special.gamma(alpha)) # constants
         
         # Save log-likelihood
         logp[i] = ll
@@ -1102,7 +1122,9 @@ def calculate_parameters(t_k,
                          tau=None,
                          model='full', 
                          history='equal', 
-                         L=1):
+                         L=1,
+                         p_lam0=(1,0),
+                         p_tau=(1,0)):
     """Compute values of one parameter given values of the other."""
     # Check parameters
     if not isinstance(t_k, list):
@@ -1130,6 +1152,10 @@ def calculate_parameters(t_k,
             lam = np.array([[lam]])
         elif lam.ndim == 1:
             lam = lam[:, np.newaxis] # broadcast time on axis 1
+
+    # Get priors on estimated parameters.
+    alpha_1, beta_1 = p_lam0
+    alpha_2, beta_2 = p_tau
 
     # Calculate number of events at each time step
     if model == 'full':
@@ -1162,12 +1188,12 @@ def calculate_parameters(t_k,
             exp_sum = np.sum(np.exp(-T[np.newaxis, :]/tau[idx]), axis=1, keepdims=True)
         else:
             exp_sum = 0.0
-        lam[idx, :] = ( (L*K*np.exp(-t/tau[idx]))
-                         /(tau[idx]*(m - exp_sum - np.exp(-t/tau[idx])))
+        lam[idx, :] = ( ((L*K + alpha_1 - 1)*np.exp(-t/tau[idx]))
+                         /(tau[idx]*(m - exp_sum - np.exp(-t/tau[idx])) + beta_1)
                       ) 
         
         # Handle infinite values (homogeneous process)
-        lam[~idx, :] = L*K/(np.sum(T) + t)
+        lam[~idx, :] = (L*K + alpha_1 - 1)/(np.sum(T) + t + beta_1)
 
         return lam
 
