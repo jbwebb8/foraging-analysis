@@ -1369,6 +1369,21 @@ class BayesianModel(ForagingModel):
         # Format data subsets
         self.index_data = True
 
+    def _add_priors(self, *, p_lam0, p_tau):
+        # Add prior on initial Poisson rate.
+        if p_lam0 is None:
+            p_lam0 = (1, 0)
+        if (not isinstance(p_lam0, dict)):
+            p_lam0 = {env_id: p_lam0 for env_id in self._active_envs}
+        self._params[self._active_key]['p_lam0'] = p_lam0
+
+        # Add prior on decay rate.
+        if p_tau is None:
+            p_tau = (1, 0)
+        if (not isinstance(p_tau, dict)):
+            p_tau = {env_id: p_tau for env_id in self._active_envs}
+        self._params[self._active_key]['p_tau'] = p_tau
+
     def _fit(self, data, *,
              ll_thresh=None,
              lhw_thresh=None,
@@ -1449,16 +1464,7 @@ class BayesianModel(ForagingModel):
             self._params[self._active_key]['lhw_thresh'][env_id] = lhw_thresh[env_id]
 
         # Add priors.
-        if p_lam0 is None:
-            p_lam0 = (1, 0)
-        if (not isinstance(p_lam0, dict)):
-            p_lam0 = {env_id: p_lam0 for env_id in self._active_envs}
-        self._params[self._active_key]['p_lam0'] = p_lam0
-        if p_tau is None:
-            p_tau = (1, 0)
-        if (not isinstance(p_tau, dict)):
-            p_tau = {env_id: p_tau for env_id in self._active_envs}
-        self._params[self._active_key]['p_tau'] = p_tau
+        self._add_priors(p_lam0=p_lam0, p_tau=p_tau)
 
     def _get_patch_indices(self, n_patch, index, error=True, alt=False):
         # Get indices corresponding to patches to analyze.
@@ -1609,41 +1615,16 @@ class BayesianModel(ForagingModel):
                         else:
                             crit.append(np.ones([len(t_b)-1], dtype=bool))
                             
-                        # Check criterion for log-likelihood width.
+                        # Check criterion for likelihood width.
                         if self.params['lhw_thresh'][env_id] is not None:
-                            # Compute log-likelihood across range of values.
-                            lam_range = helper.calculate_parameters(t_k,
-                                                                    t_b,
-                                                                    L=L,
-                                                                    T=T,
-                                                                    lam=None,
-                                                                    tau=tau_range,
-                                                                    model='hidden', 
-                                                                    history='consecutive',
-                                                                    p_lam0=p_lam0,
-                                                                    p_tau=p_tau)
-                            #lam_range = lam_range[:, 0] # remove time axis
-                            lh = np.ones([len(tau_range), len(t_b)-1])*np.nan
-                            for l in range(len(tau_range)):
-                                bc = np.ones([len(t_b)-1]) # array for broadcasting
-                                lh[l] = helper.estimate_log_likelihood(t_k,
-                                                                    t_b,
-                                                                    L=L,
-                                                                    T=T,
-                                                                    lam=lam_range[l]*bc,
-                                                                    tau=tau_range[l]*bc,
-                                                                    model='hidden', 
-                                                                    history='consecutive',
-                                                                    p_lam0=p_lam0,
-                                                                    p_tau=p_tau,
-                                                                    epsilon=0.1)
-                            
-                            # Estimate peak widths at each time point.
-                            # (Unfortunately, this is a difficult method to vectorize.)
-                            lhw = np.ones([len(t_b)-1])
-                            for l, t in enumerate(t_b[1:]):
-                                lhw[l] = self.FWHM(lam_range[:, l], np.exp(lh[:, l]))
-                            assert np.sum(lhw < 0.0) == 0
+                            # Compute likelihood width.
+                            lhw = self.compute_likelihood_width(t_k, 
+                                                                t_b, 
+                                                                L=L, 
+                                                                T=T,
+                                                                tau_range=tau_range,
+                                                                p_lam0=p_lam0,
+                                                                p_tau=p_tau)
 
                             # Check if criterion met.
                             if filt is not None:
@@ -1666,6 +1647,62 @@ class BayesianModel(ForagingModel):
                             t_hat[-1][j] = t_bin[np.nonzero(crit)[0][0]]
         
         return self.unravel(t_hat)
+
+    def compute_likelihood_width(self, t_k, t_bin, *,
+                                 L, T,
+                                 tau_range,
+                                 p_lam0,
+                                 p_tau):
+        # Get values of Poisson rate given range of values of decay rate.
+        lam_range = helper.calculate_parameters(t_k,
+                                                t_bin,
+                                                L=L,
+                                                T=T,
+                                                lam=None,
+                                                tau=tau_range,
+                                                model='hidden', 
+                                                history='consecutive',
+                                                p_lam0=p_lam0,
+                                                p_tau=p_tau)
+
+        # Compute log-likelihood at all time points for each set
+        # of the rate parameters.
+        lh = np.ones([len(tau_range), len(t_bin)-1])*np.nan
+        bc = np.ones([len(t_bin)-1]) # array for broadcasting
+        for k in range(len(tau_range)):
+            lh[k, :] = helper.estimate_log_likelihood(t_k,
+                                                      t_bin,
+                                                      L=L,
+                                                      T=T,
+                                                      lam=lam_range[k, :]*bc,
+                                                      tau=tau_range[k]*bc,
+                                                      model='hidden', 
+                                                      history='consecutive', 
+                                                      p_lam0=p_lam0,
+                                                      p_tau=p_tau,
+                                                      epsilon=0.1)
+        
+        # Estimate peak widths of likelihood at each time point.
+        # (Unfortunately, this is a difficult method to vectorize.)
+        lhw = np.ones([len(t_bin)-1])
+        for k, t in enumerate(t_bin[1:]):
+            lhw[k] = self.FWHM(lam_range[:, k], np.exp(lh[:, k]))
+        
+        # Return peak widths.
+        if np.sum(lhw < 0.0) > 0:
+            self._debug = {'lam_range': lam_range,
+                           'lh': lh,
+                           'lhw': lhw,
+                           'lam_MLE': lam_MLE,
+                           'tau_MLE': tau_MLE,
+                           'll': ll,
+                           't_k': t_k,
+                           't_bin': t_bin,
+                           'L': L,
+                           'T': T}
+            raise ValueError('Negative lhw.')
+        else:
+            return np.atleast_1d(np.squeeze(lhw))
 
     #@classmethod
     def smooth_likelihood(self, x, y, sigma=0.25):
@@ -1749,7 +1786,10 @@ class FittedBayesianModel(BayesianModel):
 
     def _fit(self,
              data,
-             param_names,
+             fit_names=[],
+             exp_names=[],
+             p_lam0=None,
+             p_tau=None,
              percentile=0.1,
              center=None, 
              constrain=False,
@@ -1760,9 +1800,11 @@ class FittedBayesianModel(BayesianModel):
              tau_range=None,
              filt=None):
         # Check params
-        if not isinstance(param_names, list):
-            param_names = [param_names]
-        if any([name not in self.PARAM_NAMES for name in param_names]):
+        if not isinstance(fit_names, list):
+            fit_names = [fit_names]
+        if not isinstance(exp_names, list):
+            exp_names = [exp_names]
+        if any([name not in self.PARAM_NAMES for name in fit_names + exp_names]):
             raise ValueError('Parameter name not recognized.')
 
         # Check environment
@@ -1777,10 +1819,12 @@ class FittedBayesianModel(BayesianModel):
         if (np.sum(np.array(self.unravel(data['n_patch'])) == 0) == 0) and (len(data['n_patch']) > 0):
             warnings.warn('Patch numbers must be zero-indexed.', category=SyntaxWarning)
         
+        # Add priors.
+        self._add_priors(p_lam0=p_lam0, p_tau=p_tau)
+
         # Fit parameters based on experimental values at patch leaving.
-        names = [name for name in self.PARAM_NAMES if name not in param_names]
         exp_data, exp_params = self._fit_exp(data, 
-                                             names, 
+                                             exp_names, 
                                              percentile=percentile,
                                              center=center,
                                              constrain=constrain,
@@ -1789,11 +1833,11 @@ class FittedBayesianModel(BayesianModel):
         # Fit parameters based on minimization of prediction error.
         env_ids = np.unique(self.unravel(data['env_id']))
         param_inits = {name: [exp_params[name][env_id] for env_id in env_ids]
-                       for name in self.PARAM_NAMES}
+                       for name in fit_names + exp_names}
         param_inits['lambda0'] = [self.env_params[env_id]['lambda0'] 
                                   for env_id in env_ids]
         self._fit_num(data, 
-                      param_names, 
+                      fit_names, 
                       param_inits,
                       constrain=constrain,
                       bin_size=bin_size,
@@ -1802,11 +1846,17 @@ class FittedBayesianModel(BayesianModel):
                       max_iters=max_iters,
                       tau_range=tau_range,
                       filt=filt)
+
+        # Create null values for remaining parameters.
+        for name in self.PARAM_NAMES:
+            if name not in fit_names + exp_names:
+                self._params[self._active_key][name] = {env_id: None for env_id in env_ids}
                        
         # Rescale Poisson rate based on initial rate
         for env_id in self._params[self._active_key]['lam_thresh'].keys():
             self._params[self._active_key]['lam_thresh'][env_id] *= self.env_params[env_id]['lambda0']
-            self._params[self._active_key]['lhw_thresh'][env_id] *= self.env_params[env_id]['lambda0']
+            if self._params[self._active_key]['lhw_thresh'][env_id] is not None:
+                self._params[self._active_key]['lhw_thresh'][env_id] *= self.env_params[env_id]['lambda0']
 
         return exp_data
 
@@ -1857,6 +1907,10 @@ class FittedBayesianModel(BayesianModel):
             track = self._track
             L = int(self.REWARD_VOLUME/self._V0)
 
+            # Get associated priors.
+            p_lam0 = self.params['p_lam0'][env_id]
+            p_tau = self.params['p_tau'][env_id]
+
             # Add travel time data
             if constrain:
                 key = track
@@ -1892,7 +1946,9 @@ class FittedBayesianModel(BayesianModel):
                                                                   L=L,
                                                                   T=T,
                                                                   model='hidden', 
-                                                                  history='consecutive')
+                                                                  history='consecutive',
+                                                                  p_lam0=p_lam0,
+                                                                  p_tau=p_tau)
                     
                     # Compute log-likelihood for MLE.
                     ll = helper.estimate_log_likelihood(t_k,
@@ -1903,36 +1959,25 @@ class FittedBayesianModel(BayesianModel):
                                                         tau=tau_MLE,
                                                         model='hidden', 
                                                         history='consecutive', 
+                                                        p_lam0=p_lam0,
+                                                        p_tau=p_tau,
                                                         epsilon=0.1)
                     ll /= np.sum(T[:-1]) + t_p[m] # normalize LL by total time of model
 
                     # Compute log-likelihood across range of values.
-                    lam_range = helper.calculate_parameters(t_k,
-                                                            np.array([0.0, t_p[m]]),
-                                                            L=L,
-                                                            T=T,
-                                                            lam=None,
-                                                            tau=tau_range,
-                                                            model='hidden', 
-                                                            history='consecutive')
-                    lam_range = lam_range[:, 0] # remove time axis
-                    lh = np.ones([len(tau_range)])*np.nan
-                    for k in range(len(tau_range)):
-                        lh[k] = helper.estimate_log_likelihood(t_k,
-                                                               np.array([0.0, t_p[m]]),
-                                                               L=L,
-                                                               T=T,
-                                                               lam=np.atleast_1d(lam_range[k]),
-                                                               tau=np.atleast_1d(tau_range[k]),
-                                                               model='hidden', 
-                                                               history='consecutive', 
-                                                               epsilon=0.1)
+                    lhw_j = self.compute_likelihood_width(t_k, 
+                                                          np.array([0.0, t_p[m]]), 
+                                                          L=L, 
+                                                          T=T,
+                                                          tau_range=tau_range,
+                                                          p_lam0=p_lam0,
+                                                          p_tau=p_tau)
                 
                 # Save results
                 lt[j] = lam_MLE/self._lambda0 # normalize Poisson rate
                 tl[j] = tau_MLE
                 llt[j] = ll
-                lhw[j] = self.FWHM(lam_range, np.exp(lh))/self._lambda0 # normalize
+                lhw[j] = lhw_j/self._lambda0 # normalize
             
             # Add estimated parameter data
             for k, v in zip(['lam_thresh', 'tau_leave', 'll_thresh', 'lhw_thresh'], [lt, tl, llt, lhw]):
@@ -2028,7 +2073,9 @@ class FittedBayesianModel(BayesianModel):
         # Create placeholders
         env_ids = np.unique(self.unravel(data['env_id']))
         lam_all = {env_id: [] for env_id in env_ids}
+        compute_ll = ('ll_thresh' in param_inits.keys())
         ll_all = {env_id: [] for env_id in env_ids}
+        compute_lhw = ('lhw_thresh' in param_inits.keys())
         lhw_all = {env_id: [] for env_id in env_ids}
         Y = {env_id: [] for env_id in env_ids}
         t_bin = np.linspace(0.0, T_max, num=int(T_max/bin_size)+1)
@@ -2064,6 +2111,10 @@ class FittedBayesianModel(BayesianModel):
                 track = self._track
                 L = int(self.REWARD_VOLUME/self._V0)
 
+                # Get associated priors.
+                p_lam0 = self.params['p_lam0'][env_id]
+                p_tau = self.params['p_tau'][env_id]
+
                 # Iterate over patches within session
                 i_p = np.nonzero(index)[0] # patches to index
                 lam_i = np.ones([len(i_p), len(t_bin)-1])*np.nan # estimated lambda at each time point
@@ -2094,63 +2145,41 @@ class FittedBayesianModel(BayesianModel):
                                                                       L=L,
                                                                       T=T,
                                                                       model='hidden', 
-                                                                      history='consecutive')
+                                                                      history='consecutive',
+                                                                      p_lam0=p_lam0,
+                                                                      p_tau=p_tau)
                         
-                        # Compute log-likelihood for MLE.
-                        ll = helper.estimate_log_likelihood(t_k,
-                                                            t_bin,
-                                                            L=L,
-                                                            T=T,
-                                                            lam=lam_MLE,
-                                                            tau=tau_MLE,
-                                                            model='hidden', 
-                                                            history='consecutive', 
-                                                            epsilon=0.1)
-                        ll /= np.sum(T[:-1]) + t_bin[1:] # normalize LL by total time of model
-
-                        # Compute log-likelihood across range of values.
-                        lam_range = helper.calculate_parameters(t_k,
+                        if compute_ll:
+                            # Compute log-likelihood for MLE.
+                            ll = helper.estimate_log_likelihood(t_k,
                                                                 t_bin,
                                                                 L=L,
                                                                 T=T,
-                                                                lam=None,
-                                                                tau=tau_range,
+                                                                lam=lam_MLE,
+                                                                tau=tau_MLE,
                                                                 model='hidden', 
-                                                                history='consecutive')
-                        lh = np.ones([len(tau_range), len(t_bin)-1])*np.nan
-                        for k in range(len(tau_range)):
-                            lh[k, :] = helper.estimate_log_likelihood(t_k,
-                                                                      t_bin,
-                                                                      L=L,
-                                                                      T=T,
-                                                                      lam=lam_range[k, :],
-                                                                      tau=tau_range[k]*np.ones([len(t_bin)-1]),
-                                                                      model='hidden', 
-                                                                      history='consecutive', 
-                                                                      epsilon=0.1)
-                        
-                        # Estimate peak widths at each time point.
-                        # (Unfortunately, this is a difficult method to vectorize.)
-                        lhw = np.ones([len(t_bin)-1])
-                        for k, t in enumerate(t_bin[1:]):
-                            lhw[k] = self.FWHM(lam_range[:, k], np.exp(lh[:, k]))
-                        if np.sum(lhw < 0.0) > 0:
-                            self._debug = {'lam_range': lam_range,
-                                           'lh': lh,
-                                           'lhw': lhw,
-                                           'lam_MLE': lam_MLE,
-                                           'tau_MLE': tau_MLE,
-                                           'll': ll,
-                                           't_k': t_k,
-                                           't_bin': t_bin,
-                                           'L': L,
-                                           'T': T}
-                            raise ValueError('Negative lhw.')
+                                                                history='consecutive', 
+                                                                p_lam0=p_lam0,
+                                                                p_tau=p_tau,
+                                                                epsilon=0.1)
+                            ll /= np.sum(T[:-1]) + t_bin[1:] # normalize LL by total time of model
+
+                        if compute_lhw:
+                            # Compute log-likelihood across range of values.
+                            lhw = self.compute_likelihood_width(t_k, 
+                                                                t_bin, 
+                                                                L=L, 
+                                                                T=T,
+                                                                tau_range=tau_range,
+                                                                p_lam0=p_lam0,
+                                                                p_tau=p_tau)
 
                     # Save results
                     lam_i[j, :] = filt(lam_MLE)
-                    ll_i[j, :] = filt(ll)
-                    lhw_i[j, :] = filt(lhw)
+                    if compute_ll:
+                        ll_i[j, :] = filt(ll)
+                    if compute_lhw:
+                        lhw_i[j, :] = filt(lhw)
 
                 # Add discretized estimated values for optimization function.
                 lam_all[env_id].append(lam_i)
@@ -2235,14 +2264,17 @@ class FittedBayesianModel(BayesianModel):
         # Set parameter values
         loc = []
         for var in ['lam_thresh', 'll_thresh', 'lhw_thresh', 'lambda0']:
-            idx = params[var].get('index', None)
-            if idx is None:
-                # If index not provided, pass value of parameter in each condition.
-                loc.append(np.atleast_1d(params[var]['value']))
+            if params.get(var, None) is None:
+                loc.append([None]*len(Y))
             else:
-                # Use index to index x for unique values, and then use ids to expand
-                # vector in order to assign value for each condition.
-                loc.append(np.atleast_1d(x[params[var]['index']][params[var]['ids']]))
+                idx = params[var].get('index', None)
+                if idx is None:
+                    # If index not provided, pass value of parameter in each condition.
+                    loc.append(np.atleast_1d(params[var]['value']))
+                else:
+                    # Use index to index x for unique values, and then use ids to expand
+                    # vector in order to assign value for each condition.
+                    loc.append(np.atleast_1d(x[params[var]['index']][params[var]['ids']]))
 
         # Get threshold values from optimization vector.        
         lam_thresh, ll_thresh, lhw_thresh, lambda0 = loc
@@ -2261,10 +2293,12 @@ class FittedBayesianModel(BayesianModel):
             assert np.sum(lhw_est < 0.0) == 0
 
             # Find first time indices that satisfy criteria.
-            crit = (lam_est <= lam_th*lam0, 
-                    ll_est >= ll_th, 
-                    lhw_est <= lhw_th*lam0)
-            crit = np.logical_and.reduce(crit, axis=0)
+            crit = [lam_est <= lam_th*lam0]
+            if ll_th is not None:
+                crit.append(ll_est >= ll_th)
+            if lhw_th is not None:
+                crit.append(lhw_est <= lhw_th*lam0)
+            crit = np.logical_and.reduce(tuple(crit), axis=0)
             idx = np.argwhere(crit)
             N, index = np.unique(idx[:, 0], return_index=True)
             idx = idx[index, 1]        
