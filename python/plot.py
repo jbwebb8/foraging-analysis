@@ -10,7 +10,7 @@ import ephys
 
 class Plotter:
 
-    DEFAULT_SETTINGS = {'cmap': 'copper',
+    DEFAULT_SETTINGS = {'cmap': 'bone',
                         'style': 'seaborn-deep',
                         'rcParams': {}}
 
@@ -1172,9 +1172,12 @@ class Plotter:
                           label=None,
                           bins=None,
                           center=None,
+                          percentile=None,
+                          spacing='linear',
                           pdf_scale=1.0,
                           hist_kwargs={},
-                          dist_kwargs={}):
+                          dist_kwargs={},
+                          ignore_nan=False):
         # Check input data. Should be 1D vector.
         if isinstance(x, list):
             x = np.array(x)
@@ -1182,6 +1185,8 @@ class Plotter:
             raise SyntaxError('x must be numpy array.')
         elif x.ndim > 1:
             raise SyntaxError('x must be a 1D array.')
+        if ignore_nan:
+            x = x[~np.isnan(x)]
 
         # Check model attributes.
         if not isinstance(model, ephys.Distribution):
@@ -1204,7 +1209,12 @@ class Plotter:
     
         # Plot fitted distribution.
         model.fit(x)
-        t = np.linspace(x.min(), x.max(), num=1000)
+        if spacing == 'linear':
+            t = np.linspace(x.min(), x.max(), num=1000)
+        elif spacing == 'geometric':
+            t = np.geomspace(x.min(), x.max(), num=1000)
+        else:
+            raise ValueError(f'Unknown spacing \'{spacing}\'.')
         pdf = pdf_scale*model.pdf(t)
         self.ax.plot(t, pdf,
                      color=self.cmap(c),
@@ -1221,10 +1231,20 @@ class Plotter:
                 x_center = np.median(x)
             else:
                 raise ValueError('Unknown center \'{}\'.'.format(center))
-            self.ax.vlines(x_center, ymin=0.0, 
-                          ymax=pdf_scale*model.pdf(np.array([x_center])),
-                          color=self.cmap(c),
-                          **dist_kwargs)
+            self.ax.vlines(x_center, 
+                           ymin=0.0, 
+                           ymax=pdf_scale*model.pdf(np.array([x_center])),
+                           color=self.cmap(c),
+                           **dist_kwargs)
+        elif percentile is not None:
+            if percentile < 0.0 or percentile > 100.0:
+                raise ValueError('percentile must be between 0 and 100.')
+            x_p = np.percentile(x, percentile, interpolation='linear')
+            self.ax.vlines(x_p, 
+                           ymin=0.0, 
+                           ymax=pdf_scale*model.pdf(np.array([x_p])),
+                           color=self.cmap(c),
+                           **dist_kwargs)
 
     def save_figure(self, filepath, ext='pdf', dpi=None):
         plt.savefig(filepath, format=ext, dpi=dpi)
