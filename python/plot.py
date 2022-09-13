@@ -1229,6 +1229,8 @@ class Plotter:
                 x_center = x.mean()
             elif center == 'median':
                 x_center = np.median(x)
+            elif center == 'gmean':
+                x_center = np.exp(np.mean(np.log(x)))
             else:
                 raise ValueError('Unknown center \'{}\'.'.format(center))
             self.ax.vlines(x_center, 
