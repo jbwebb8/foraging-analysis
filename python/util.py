@@ -383,7 +383,8 @@ class GoogleDriveService:
                       mime_type=None,
                       exact_match=False,
                       parent=None,
-                      ignore_trash=True):
+                      ignore_trash=True,
+                      **kwargs):
         """
         Search for file IDs given criteria. Remember that folders are considered
         files with the MIME type 'application/vnd.google-apps.folder'.
@@ -443,7 +444,7 @@ class GoogleDriveService:
 
         # Query for files
         if len(q) > 0:
-            files = self._service.files().list(q=q).execute()['files']
+            files = self._service.files().list(q=q, **kwargs).execute()['files']
         else:
             raise SyntaxError('Empty query string.')
         
@@ -458,12 +459,14 @@ class GoogleDriveService:
                      unique=False, 
                      mime_type=None,
                      exact_match=False,
-                     parent=None):
+                     parent=None,
+                     **kwargs):
         # Get file IDs containing filename
         file_ids = self._get_file_ids(filename=filename, 
                                       mime_type=mime_type,
                                       exact_match=exact_match,
-                                      parent=parent)
+                                      parent=parent,
+                                      **kwargs)
         
         if (len(file_ids) > 1) and unique:
             raise SyntaxError('Multiple files matching \'%s\'. Please specify.' % filename)
