@@ -691,16 +691,49 @@ def _kernel_smoothing(counts,
                       kernel=None,
                       kernel_type='Gaussian',
                       ignore_invalid=False,
+                      padding_type=None,
+                      padding_length=0.0,
                       **kwargs):
     
     # Create kernel if not provided
     if kernel is None:
         kernel = _create_smoothing_kernel(kernel_type, dt_bin ,**kwargs)
         
+    # Create padding if desired
+    if padding_type is not None:
+        if counts.ndim > 1:
+            raise SyntaxError('Padding for multidimensional data not currently supported.')
+        
+        # Offer options similar to MATLAB:
+        # https://www.mathworks.com/help/images/ref/imfilter.html#btsmcj2-3
+        n_pad = round(padding_length/dt_bin)
+        if not isinstance(padding_type, str):
+            # Assume scalar provided.
+            pad = padding_type*np.ones([2, n_pad])
+        elif padding_type == 'symmetric':
+            # Mirror edges.
+            pad = np.vstack([counts[:n_pad:-1], 
+                             counts[-n_pad::-1]])
+        elif padding_type == 'replicate':
+            # Extend edges.
+            pad = np.vstack([np.ones([n_pad])*counts[0],
+                             np.ones([n_pad])*counts[-1]])
+        elif padding_type == 'circular':
+            # Assume circular array.
+            pad = np.vstack([counts[-n_pad:],
+                             counts[:n_pad]])
+        else:
+            raise ValueError(f'Unknown padding type \'{padding_type}\'.')
+
+        # Pad array.
+        counts = np.hstack([pad[0,:], counts, pad[1,:]])
+    else:
+        n_pad = 0
+    
     # Smooth counts by convolving with kernel
     n_smooth = _convolve(counts, kernel, axis=axis, ignore_invalid=ignore_invalid)
     
-    return n_smooth
+    return n_smooth[n_pad:len(n_smooth)-n_pad]
     
 
 def _create_smoothing_kernel(kernel_type, dt_bin, **kwargs):
