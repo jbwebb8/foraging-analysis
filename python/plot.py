@@ -79,6 +79,46 @@ class Plotter:
         for ax_ in axes_:
             ax_.set_xscale(scale)
 
+    def format_axis(self, style='simple', all_axes=True):
+        # Get axes to format.
+        if all_axes:
+            axes_ = self.axes[self.show].flatten()
+        else:
+            axes_ = [self.ax]
+
+        # Attempt to draw figure, which may alter some axis properties (e.g. limits).
+        plt.draw()
+
+        # Format axes in specified style.
+        for ax_ in axes_:
+            self._format_axis(ax_, style=style)
+    
+    def _format_axis(self, ax, style):
+        if style.lower() == 'simple':
+            # Basic style with x- and y-axis spines visible between tick marks.
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            xticks, xlim = ax.get_xticks(), ax.get_xlim()
+            ax.spines['bottom'].set_bounds(xticks[xticks >= xlim[0]][0],
+                                           xticks[xticks <= xlim[-1]][-1])
+            yticks, ylim = ax.get_yticks(), ax.get_ylim()
+            ax.spines['left'].set_bounds(yticks[yticks >= ylim[0]][0],
+                                         yticks[yticks <= ylim[-1]][-1])
+
+            # Remove minor ticks outside of bounds.
+            xminticks = np.array(ax.get_xticks(minor=True))
+            if len(xminticks) > 0:
+                ax.set_xticks(xminticks[np.logical_and(xminticks >= xticks[xticks >= xlim[0]][0],
+                                                       xminticks <= xticks[xticks <= xlim[-1]][-1])],
+                              minor=True)
+            yminticks = np.array(ax.get_yticks(minor=True))
+            if len(yminticks) > 0:
+                ax.set_yticks(yminticks[np.logical_and(yminticks >= yticks[yticks >= ylim[0]][0],
+                                                       yminticks <= yticks[yticks <= ylim[-1]][-1])],
+                              minor=True)
+        else:
+            raise ValueError(f'Unknown style \'{style}\'.')
+
     def plot_learning_curve(self,
                             days,
                             data,
