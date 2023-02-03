@@ -79,3 +79,4 @@ def _run_detection_block(mouse, patch):
 
 def _run_free_block(mouse, patch):
     """One attempt to harvest reward in free-licking task."""
+    pass

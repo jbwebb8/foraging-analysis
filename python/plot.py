@@ -1,13 +1,16 @@
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+import scipy.stats as stats
 import math
 import random
+import warnings
 from util import get_patch_statistics, _check_list, in_interval
+import ephys
 
 class Plotter:
 
-    DEFAULT_SETTINGS = {'cmap': 'copper',
+    DEFAULT_SETTINGS = {'cmap': 'bone',
                         'style': 'seaborn-deep',
                         'rcParams': {}}
 
@@ -22,15 +25,18 @@ class Plotter:
         # Initial figure
         self.fig = None
 
+    def update_rcparams(self, rcparams):
+        matplotlib.rcParams.update(rcparams)
+
     def set_cmap(self, name):
         self.cmap = plt.get_cmap(name)
 
-    def create_new_figure(self, figsize=(15, 15), rows=1, cols=1):
+    def create_new_figure(self, figsize=(15, 15), rows=1, cols=1, **kwargs):
         # Clear old figure
         plt.close('all')
         
         # Create figure and specified axes
-        self.fig, self.axes = plt.subplots(rows, cols, figsize=figsize)
+        self.fig, self.axes = plt.subplots(rows, cols, figsize=figsize, **kwargs)
 
         # Set current axis to first if multiple axes
         if (rows == 1) and (cols == 1):
@@ -73,7 +79,45 @@ class Plotter:
         for ax_ in axes_:
             ax_.set_xscale(scale)
 
+    def format_axis(self, style='simple', all_axes=True):
+        # Get axes to format.
+        if all_axes:
+            axes_ = self.axes[self.show].flatten()
+        else:
+            axes_ = [self.ax]
+
+        # Attempt to draw figure, which may alter some axis properties (e.g. limits).
+        plt.draw()
+
+        # Format axes in specified style.
+        for ax_ in axes_:
+            self._format_axis(ax_, style=style)
     
+    def _format_axis(self, ax, style):
+        if style.lower() == 'simple':
+            # Basic style with x- and y-axis spines visible between tick marks.
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            xticks, xlim = ax.get_xticks(), ax.get_xlim()
+            ax.spines['bottom'].set_bounds(xticks[xticks >= xlim[0]][0],
+                                           xticks[xticks <= xlim[-1]][-1])
+            yticks, ylim = ax.get_yticks(), ax.get_ylim()
+            ax.spines['left'].set_bounds(yticks[yticks >= ylim[0]][0],
+                                         yticks[yticks <= ylim[-1]][-1])
+
+            # Remove minor ticks outside of bounds.
+            xminticks = np.array(ax.get_xticks(minor=True))
+            if len(xminticks) > 0:
+                ax.set_xticks(xminticks[np.logical_and(xminticks >= xticks[xticks >= xlim[0]][0],
+                                                       xminticks <= xticks[xticks <= xlim[-1]][-1])],
+                              minor=True)
+            yminticks = np.array(ax.get_yticks(minor=True))
+            if len(yminticks) > 0:
+                ax.set_yticks(yminticks[np.logical_and(yminticks >= yticks[yticks >= ylim[0]][0],
+                                                       yminticks <= yticks[yticks <= ylim[-1]][-1])],
+                              minor=True)
+        else:
+            raise ValueError(f'Unknown style \'{style}\'.')
 
     def plot_learning_curve(self,
                             days,
@@ -497,13 +541,13 @@ class Plotter:
                                data, 
                                cond, 
                                cond_params,
-                               exclude_cond=[],
-                               cond_order=None,
-                               center='median',
-                               err='sem',
+                               include_cond=None,
                                c=0.5,
                                figsize=(15, 15),
                                new_fig=True,
+                               x_offset=0.0,
+                               center='median',
+                               err='sem',
                                plot_subjects=True,
                                plot_scatter=False):
         # Create new figure
@@ -515,16 +559,6 @@ class Plotter:
             data = {'mouse': data}
             cond = {'mouse': cond}
 
-        # Find plot order of conditions
-        if cond_order is None:
-            cond_order = np.arange(len(cond_params) - len(exclude_cond))
-        else:
-            assert len(cond_order) == len(cond_params) - len(exclude_cond)
-            if not isinstance(cond_order, np.ndarray):
-                cond_order = np.array(cond_order)
-            gt = (cond_order[np.newaxis, :] > np.array(exclude_cond)[:, np.newaxis])
-            cond_order -= np.sum(gt, axis=0)
-        
         # Plot combined data
         # Get consolidated data across animals
         d_plot, cond_plot = get_patch_statistics(data, 
@@ -535,15 +569,29 @@ class Plotter:
                                             ids=cond, 
                                             method=center, 
                                             return_all=False)
+
+        # Format included conditions
+        if include_cond is None:
+            include_cond = np.unique(cond_plot)
+        elif not isinstance(include_cond, np.ndarray):
+            include_cond = np.asarray(include_cond)
+        include_cond = include_cond[np.isin(include_cond, np.unique(cond_plot))]
         
         # Exclude condition data
-        idx = ~np.isin(cond_plot, exclude_cond)
+        idx = np.isin(cond_plot, include_cond)
         d_plot = d_plot[idx]
         d_err = d_err[idx]
         cond_plot = cond_plot[idx]
 
+        # Determine plot order (patch statistics returned sorted by default)
+        idx = np.argwhere(include_cond[np.newaxis, :] == cond_plot[:, np.newaxis])
+        cond_order = np.argsort(idx[:, 1])
+        assert (cond_plot[cond_order] == include_cond).all()
+        
         # Plot consolidated data
-        x = np.arange(len(cond_plot)) + plot_subjects*len(data.keys())*(len(cond_plot) + 1)
+        x = np.arange(len(cond_plot)) \
+            + plot_subjects*len(data.keys())*(len(cond_plot) + 1) \
+            + x_offset
         yerr = np.vstack([np.zeros(len(d_err)), d_err])
         self.ax.bar(x, 
                     d_plot[cond_order], 
@@ -554,13 +602,14 @@ class Plotter:
         self.ax.set_xticks([]) # clear default ticks
         self.ax.set_xticklabels([]) # clear default labels
         xticks = self.ax.get_xticks()
-        self.ax.set_xticks(list(xticks) + list(x))
+        self.ax.set_xticks(list(xticks) + list(x - x_offset))
         xtick_labels = [label._text for label in self.ax.get_xticklabels()
                         if label._text != '']
         new_labels = [', '.join([str(p) for p in params]) for key, params in cond_params.items()
-                    if key not in exclude_cond]
+                      if key in include_cond]
         new_labels = [new_labels[i] for i in cond_order] # reorder conditions
-        new_labels[0] = '{}\n'.format('all') + new_labels[0]
+        if plot_subjects:
+            new_labels[0] = '{}\n'.format('all') + new_labels[0]
         self.ax.set_xticklabels(xtick_labels + new_labels, rotation=45, ha='right')
 
         # Plot data over animals, conditions
@@ -587,17 +636,17 @@ class Plotter:
                                                     return_all=False)
 
                 # Exclude condition data
-                idx = ~np.isin(cond_all, exclude_cond)
+                idx = np.isin(cond_all, include_cond)
                 d_all = d_all[idx]
                 cond_all = cond_all[idx]
-                idx = ~np.isin(cond_plot, exclude_cond)
+                idx = np.isin(cond_plot, include_cond)
                 d_plot = d_plot[idx]
                 d_err = d_err[idx]
                 cond_plot = cond_plot[idx]
 
                 if plot_subjects:
                     # Plot statistic
-                    x = np.arange(len(cond_plot)) + i*(len(cond_plot) + 1)
+                    x = np.arange(len(cond_plot)) + i*(len(cond_plot) + 1) + x_offset
                     yerr = np.vstack([np.zeros(len(d_err)), d_err])
                     self.ax.bar(x, 
                                 d_plot[cond_order], 
@@ -606,11 +655,11 @@ class Plotter:
 
                     # Format axis
                     xticks = self.ax.get_xticks()
-                    self.ax.set_xticks(list(xticks) + list(x))
+                    self.ax.set_xticks(list(xticks) + list(x - x_offset))
                     xtick_labels = [label._text for label in self.ax.get_xticklabels()
                                     if label._text != '']
                     new_labels = [', '.join([str(p) for p in params]) for key, params in cond_params.items()
-                            if key not in exclude_cond]
+                                  if key in include_cond]
                     new_labels = [new_labels[i] for i in cond_order] # reorder conditions
                     new_labels[0] = '{}\n'.format(mouse_id) + new_labels[0]
                     self.ax.set_xticklabels(xtick_labels + new_labels)
@@ -632,7 +681,9 @@ class Plotter:
                         d_err = d_err_
 
                     # Plot statistic
-                    x = np.arange(len(cond_plot_all)) + plot_subjects*len(data.keys())*(len(cond_plot_all) + 1)
+                    x = np.arange(len(cond_plot_all)) \
+                        + plot_subjects*len(data.keys())*(len(cond_plot_all) + 1) \
+                        + x_offset
                     #x = x.astype(np.float64) + np.linspace(-0.3, 0.3, len(data.keys())+1)[i+1]
                     x = x.astype(np.float64) + np.random.uniform(0.10, 0.30)*(-1)**random.randrange(2)
                     #yerr = np.vstack([np.zeros(len(d_err)), d_err])
@@ -643,14 +694,395 @@ class Plotter:
                                      color=self.cmap(0.0),
                                      capsize=0,
                                      marker='o',
-                                     linestyle='none')     
+                                     linestyle='none')
+
+    def swarmplot_by_condition(self,
+                               data, 
+                               cond, 
+                               cond_params,
+                               include_cond=None,
+                               c=0.5,
+                               figsize=(15, 15),
+                               new_fig=True,
+                               x_offset=0.0,
+                               x_spacing=None,
+                               plot_subjects=True,
+                               s=1.0,
+                               r_factor=1.0,
+                               order='ascending',
+                               **kwargs):
+        return self._scatter_by_condition(data, 
+                                          cond, 
+                                          cond_params,
+                                          plot_type='swarm',
+                                          include_cond=include_cond,
+                                          c=c,
+                                          figsize=figsize,
+                                          new_fig=new_fig,
+                                          x_offset=x_offset,
+                                          x_spacing=x_spacing,
+                                          plot_subjects=plot_subjects,
+                                          s=s,
+                                          r_factor=r_factor,
+                                          order=order,
+                                          **kwargs)
+
+    def boxplot_by_condition(self,
+                             data, 
+                             cond, 
+                             cond_params,
+                             include_cond=None,
+                             c=0.5,
+                             figsize=(15, 15),
+                             new_fig=True,
+                             x_offset=0.0,
+                             x_spacing=None,
+                             plot_subjects=True,
+                             **kwargs):
+        return self._scatter_by_condition(data, 
+                                          cond, 
+                                          cond_params,
+                                          plot_type='box',
+                                          include_cond=include_cond,
+                                          c=c,
+                                          figsize=figsize,
+                                          new_fig=new_fig,
+                                          x_offset=x_offset,
+                                          x_spacing=x_spacing,
+                                          plot_subjects=plot_subjects,
+                                          **kwargs)
+
+    def density_by_condition(self,
+                             data, 
+                             cond, 
+                             cond_params,
+                             include_cond=None,
+                             c=0.5,
+                             figsize=(15, 15),
+                             new_fig=True,
+                             x_offset=0.0,
+                             x_spacing=None,
+                             plot_subjects=True,
+                             bw_method=None,
+                             density_scale=1.0,
+                             **kwargs):
+        return self._scatter_by_condition(data, 
+                                          cond, 
+                                          cond_params,
+                                          plot_type='density',
+                                          include_cond=include_cond,
+                                          c=c,
+                                          figsize=figsize,
+                                          new_fig=new_fig,
+                                          x_offset=x_offset,
+                                          x_spacing=x_spacing,
+                                          plot_subjects=plot_subjects,
+                                          bw_method=bw_method,
+                                          density_scale=density_scale,
+                                          **kwargs)
+
+    def _scatter_by_condition(self,
+                              data,
+                              cond,
+                              cond_params,
+                              plot_type,
+                              include_cond=None,
+                              c=0.5,
+                              figsize=(15, 15),
+                              new_fig=True,
+                              x_offset=0.0,
+                              x_spacing=None,
+                              x_centers=None,
+                              plot_subjects=True,
+                              s=1.0,
+                              r_factor=1.0,
+                              order='ascending',
+                              max_pts=None,
+                              xlim=None,
+                              ylim=None,
+                              bw_method=None,
+                              density_scale=1.0,
+                              reflect_x=False,
+                              **kwargs):
+        # Define main function with arguments above.
+        def _plot_data(y, c_y, center, xlim, ylim):
+            if plot_type.lower() == 'swarm':
+                if max_pts is not None:
+                    idx = np.random.permutation(np.arange(len(y)))[:max_pts]
+                    y = y[idx]
+                    c_y = c_y[idx]
+                x = center*np.ones(y.shape[0])
+                x, y = self.apply_swarm_spacing(x, y,
+                                                s=s,
+                                                r_factor=r_factor,
+                                                order=order,
+                                                xlim=xlim,
+                                                ylim=ylim)
+                self.ax.scatter(x, y, 
+                                color=self.cmap(c_y),
+                                s=s,
+                                **kwargs)
+            elif plot_type.lower() == 'box':
+                self.ax.boxplot(y,
+                                positions=np.array([center]), 
+                                **kwargs)
+            elif plot_type.lower() == 'density':
+                density = stats.gaussian_kde(y, bw_method=bw_method)
+                pts = np.linspace(y.min(), y.max(), num=1000)
+                x = center + ((-1)**reflect_x)*density_scale*density(pts)
+                if not np.isclose(c_y[0], c_y).all():
+                    warnings.warn('Only one color value can be applied to density '
+                                  'plot. Using first value as default.',
+                                  category=SyntaxWarning)
+                c_y = c_y[0]
+                self.ax.plot(x, pts,
+                             color=self.cmap(c_y),
+                             **kwargs)
+                self.ax.fill_betweenx(pts, x1=x, x2=center,
+                                      color=self.cmap(c_y),
+                                      alpha=0.3)
+            else:
+                raise ValueError('Unknown scatter type \'{}\'.'.format(plot_type))
+
+        # Create new figure
+        if new_fig:
+            self.create_new_figure(figsize=figsize)
+        
+        # Convert to dictionary if needed (e.g. single animal data)
+        if not isinstance(data, dict):
+            # Ensure other parameters are not dictionaries.
+            assert not (isinstance(cond, dict) or isinstance(c, dict))
+
+            # Handle data format for color argument.
+            if not isinstance(c, (list, np.ndarray)):
+                c = [c]
+            if len(c) == 1:
+                c = c*np.ones([len(cond)])
+
+            # Convert to dummy format.
+            data = {'mouse': data}
+            cond = {'mouse': cond}
+            c    = {'mouse': c}
+
+        elif not isinstance(c, dict):
+            # Assume single number given.
+            c = {key: [c*np.ones(v.shape) for v in vals] 
+                 for key, vals in data.items()}
+        
+        # Plot combined data
+        # Get consolidated data across animals
+        d_plot, cond_plot, (c_plot,) = \
+                get_patch_statistics(data, cond, c, return_all=True)
+
+        # Format included conditions
+        if include_cond is None:
+            include_cond = np.unique(cond_plot)
+        elif not isinstance(include_cond, np.ndarray):
+            include_cond = np.asarray(include_cond)
+        
+        # Exclude condition data
+        idx = np.isin(cond_plot, include_cond)
+        d_plot = d_plot[idx]
+        cond_plot = cond_plot[idx]
+        c_plot = c_plot[idx]
+
+        # Determine plot order (patch statistics returned sorted by default)
+        idx = np.argwhere(include_cond[np.newaxis, :] == np.unique(cond_plot)[:, np.newaxis])
+        cond_order = np.argsort(idx[:, 1])
+        i = 0
+        for cond_i in np.unique(cond_plot)[cond_order]:
+            while cond_i != include_cond[i]:
+                i += 1
+                if i == len(include_cond):
+                    raise SyntaxError('Condition order not compatible with included conditions.')
+        include_cond = np.unique(cond_plot)[cond_order]
+
+        # Set swarm-specific variables
+        if plot_type.lower() == 'swarm' and (xlim is None or ylim is None):
+            if ylim is None:
+                # Get limits from dummy plot
+                self.ax.scatter(np.ones(len(d_plot)), d_plot, s=0.0)
+                ylim = self.ax.get_ylim()
+            if xlim is None:
+                if x_centers is not None:
+                    xlim = [x_centers.min() + x_offset - 0.5, 
+                            x_centers.max() + x_centers.max()*plot_subjects*len(data.keys())*(len(include_cond) + 1) + x_offset + 0.5]
+                else:
+                    xlim = [x_offset - 0.5, len(include_cond) + plot_subjects*len(data.keys())*(len(cond_order) + 1) + x_offset + 0.5]
+        
+        # Get centers for each category
+        if x_centers is None:
+            centers = np.arange(len(include_cond)) \
+                      + plot_subjects*len(data.keys())*(len(include_cond) + 1)
+        else:
+            assert len(x_centers) == len(include_cond)
+            centers = x_centers + x_centers.max()*plot_subjects*len(data.keys())*(len(include_cond) + 1)
+        centers = centers.astype(np.float64)
+        if x_spacing is not None:
+            if not isinstance(x_spacing, np.ndarray):
+                x_spacing = np.asarray(x_spacing)
+            if len(x_spacing) != len(centers):
+                raise ValueError('x_spacing must be the same length as number'
+                                + ' of included conditions.') 
+            centers = x_spacing*centers
+        centers += x_offset
+
+        # Plot consolidated data
+        for cond_i, center in zip(include_cond, centers):
+            y = d_plot[cond_plot == cond_i]
+            c_y = c_plot[cond_plot == cond_i]
+            _plot_data(y, c_y, center, xlim, ylim)
+
+        # Format axis
+        self.ax.set_xticks([]) # clear default ticks
+        self.ax.set_xticklabels([]) # clear default labels
+        new_labels = [', '.join([str(p) for p in cond_params[key]]) for key in include_cond]
+        if plot_subjects:
+            if len(new_labels[0]) > 0:
+                new_labels[0] = '{}\n'.format('all') + new_labels[0]
+            else:
+                new_labels[0] = 'all'
+        xticks_all = list(centers - x_offset)
+        xlabels_all = new_labels
+        
+        # Plot data over animals, conditions
+        if plot_subjects:
+            for i, mouse_id in enumerate(data.keys()):
+                # Get all data for animal
+                d_plot, cond_plot = get_patch_statistics(data[mouse_id],
+                                                         ids=cond[mouse_id],
+                                                         return_all=True)
+                if isinstance(c, dict):
+                    _, c_plot = get_patch_statistics(data[mouse_id], 
+                                                     ids=c[mouse_id], 
+                                                     return_all=True)
+                else:
+                    c_plot = c*np.ones(len(d_plot))
+                                                    
+
+                # Exclude condition data
+                idx = np.isin(cond_plot, include_cond)
+                d_plot = d_plot[idx]
+                cond_plot = cond_plot[idx]
+                c_plot = c_plot[idx]
+
+                # Get centers for each category
+                if x_centers is None:
+                    centers = np.arange(len(include_cond)) + i*(len(include_cond) + 1)
+                else:
+                    centers = x_centers + x_centers.max()*i*(len(include_cond) + 1)
+                centers = centers.astype(np.float64)
+                if x_spacing is not None:
+                    centers = x_spacing*centers
+                centers += x_offset
+
+                # Plot consolidated data
+                for cond_i, center in zip(include_cond, centers):
+                    y = d_plot[cond_plot == cond_i]
+                    c_y = c_plot[cond_plot == cond_i]
+                    _plot_data(y, c_y, center, xlim, ylim)
+
+                # Format axis
+                new_labels = [', '.join([str(p) for p in cond_params[key]]) for key in include_cond]
+                if len(new_labels[0]) > 0:
+                    new_labels[0] = '{}\n'.format(mouse_id) + new_labels[0]
+                else:
+                    new_labels[0] = mouse_id
+                xticks_all += list(centers - x_offset)
+                xlabels_all += new_labels
+        
+        # Set axis limits to ensure swarmplot spacing correct
+        if plot_type.lower() == 'swarm':
+            self.ax.set_xlim(xlim)
+            self.ax.set_ylim(ylim)
+        
+        self.ax.set_xticks(xticks_all)
+        self.ax.set_xticklabels(xlabels_all, rotation=45, ha='right')
+
+    def apply_swarm_spacing(self, x, y, 
+                            s=1.0, 
+                            r_factor=1.0, 
+                            order='ascending',
+                            xlim=None,
+                            ylim=None):
+        # Get axis limits based on dummy scatter plot if not provided
+        if xlim is None or ylim is None:
+            pts = self.ax.scatter(x, y, s=0.0)
+            if xlim is None:
+                xlim = self.ax.get_xlim()
+            if ylim is None:
+                ylim = self.ax.get_ylim()
+        
+        # Set axis limits to set transform
+        self.ax.set_xlim(xlim)
+        self.ax.set_ylim(ylim)
+
+        # Transform data coordinates to pixel coordinates
+        xy_pix = self.ax.transData.transform(np.vstack([x, y]).T)
+        x, y = xy_pix.T # (x, y) in pixel coordinates
+
+        # Place pixel coordinates in specified order
+        r = r_factor*0.5*(s**0.5) # convert size parameter to bounding box radius
+        sort_idx = np.argsort(y)
+        if order.lower() == 'descending':
+            sort_idx = sort_idx[::-1]
+        elif order.lower() != 'ascending':
+            raise ValueError('Unknown order \'{}\'.'.format(order))
+        x = x[sort_idx]
+        y = y[sort_idx]
+
+        # Next, iterate through points to determine new x-position
+        for i in range(y.shape[0]):
+            # Determine previous points that overlap with current position
+            d = ((x[i] - x[:i])**2 + (y[i] - y[:i])**2)**0.5
+            #idx = np.atleast_1d(np.argwhere(d < 2*r).squeeze())
+            idx = np.atleast_1d(np.argwhere(np.abs(y[i] - y[:i]) < 2*r).squeeze())
+            
+            if len(idx) > 0 and np.sum(d < 2*r) > 0:
+                # Find new candidates (x', y) for x-coordinate that place current point
+                # adjacent to previous point by shifting only horizontally. These
+                # satisfy the equation:
+                #    ((x' - a)^2 + (y - b)^2)^0.5 >= 2r
+                # for all previous points (a, b). To estimate new x-coordinate, solve
+                # the equation above for the new coordinate x':
+                #    x' >= (4r^2 - (y - b)^2)^0.5 + a
+                # accounting for both the positive and negative square root. Finally,
+                # see which candidates also satisfy the minimum distance from all other
+                # previously plotted points and take the one with the minimum shift
+                # from the original position.
+                k = 1.01 # scale factor to correct for floating point errors
+                max_iters = 10 # max iterations in loop (k ~ 1.6)
+                for j in range(max_iters):
+                    # Find new candidates
+                    x_new = np.hstack([ k*(4*(r**2) - (y[i] - y[idx])**2)**0.5 + x[idx],
+                                       -k*(4*(r**2) - (y[i] - y[idx])**2)**0.5 + x[idx]])
+                    dx = x_new[np.newaxis, :] - x[idx, np.newaxis]
+                    dy = y[np.newaxis, i] - y[idx, np.newaxis]
+                    d = (dx**2 + dy**2)**0.5
+                    idx_new = np.atleast_1d(np.argwhere(np.sum(d < 2*r, axis=0) == 0).squeeze())
+                    
+                    # Break if 1+ candidates found
+                    if idx_new.size > 0:
+                        break
+                    else:
+                        k = 1.05*k
+
+                # Select new x-coordinate as minimal shift from current position
+                x[i] = x_new[idx_new][np.argmin(np.abs(x[i] - x_new[idx_new]))]
+
+        # Transform pixel coordinates back to data coordinates
+        xy_data = self.ax.transData.inverted().transform(np.vstack([x, y]).T)
+        x_data, y_data = xy_data.T
+
+        return x_data, y_data
+
+        
 
     def plot_by_condition(self, 
                           data, 
                           cond, 
                           cond_params,
-                          exclude_cond=[],
-                          cond_order=None,
+                          include_cond=None,
                           center='median',
                           err='sem',
                           c=0.5,
@@ -659,7 +1091,7 @@ class Plotter:
                           plot_subjects=True,
                           capsize=None,
                           markersize=None,
-                          linewidth=None):
+                          linewidth=1.0):
         # Create new figure
         if new_fig:
             self.create_new_figure(figsize=figsize)
@@ -669,15 +1101,16 @@ class Plotter:
             data = {'mouse': data}
             cond = {'mouse': cond}
 
-        # Find plot order of conditions
-        if cond_order is None:
-            cond_order = np.arange(len(cond_params) - len(exclude_cond))
-        else:
-            assert len(cond_order) == len(cond_params) - len(exclude_cond)
-            if not isinstance(cond_order, np.ndarray):
-                cond_order = np.array(cond_order)
-            gt = (cond_order[np.newaxis, :] > np.array(exclude_cond)[:, np.newaxis])
-            cond_order -= np.sum(gt, axis=0)
+        # Format included conditions
+        if include_cond is None:
+            include_cond = np.unique(cond_plot)
+        elif not isinstance(include_cond, np.ndarray):
+            include_cond = np.asarray(include_cond)
+
+        # Determine plot order (patch statistics returned sorted by default)
+        idx = np.argwhere(include_cond[np.newaxis, :] == cond_plot[:, np.newaxis])
+        cond_order = np.argsort(idx[:, 1])
+        assert (cond_plot[cond_order] == include_cond).all()
         
         # Plot data over animals, conditions
         if plot_subjects:
@@ -698,10 +1131,10 @@ class Plotter:
                                                     return_all=False)
 
                 # Exclude condition data
-                idx = ~np.isin(cond_all, exclude_cond)
+                idx = np.isin(cond_all, include_cond)
                 d_all = d_all[idx]
                 cond_all = cond_all[idx]
-                idx = ~np.isin(cond_plot, exclude_cond)
+                idx = np.isin(cond_plot, include_cond)
                 d_plot = d_plot[idx]
                 d_err = d_err[idx]
                 cond_plot = cond_plot[idx]
@@ -728,7 +1161,7 @@ class Plotter:
                                             return_all=False)
 
         # Exclude condition data
-        idx = ~np.isin(cond_plot, exclude_cond)
+        idx = np.isin(cond_plot, include_cond)
         d_plot = d_plot[idx]
         d_err = d_err[idx]
         cond_plot = cond_plot[idx]
@@ -755,9 +1188,105 @@ class Plotter:
         # Set axis labels
         self.ax.set_xticks(x)
         new_labels = [', '.join([str(p) for p in params]) for key, params in cond_params.items()
-                      if key not in exclude_cond]
+                      if key in include_cond]
         new_labels = [new_labels[i] for i in cond_order] # reorder conditions
         self.ax.set_xticklabels(new_labels, rotation=45, ha='right')
+
+    def _format_cond_order(self, cond_order, cond_params, exclude_cond):
+        if cond_order is None:
+            cond_order = np.arange(len(cond_params) - len(exclude_cond))
+        else:
+            assert len(cond_order) == len(cond_params) - len(exclude_cond)
+            if not isinstance(cond_order, np.ndarray):
+                cond_order = np.array(cond_order)
+            gt = (cond_order[np.newaxis, :] > np.array(exclude_cond)[:, np.newaxis])
+            cond_order -= np.sum(gt, axis=0)
+        
+        return cond_order
+
+    def plot_distribution(self, x, 
+                          model,
+                          c=0.5,
+                          figsize=(15, 15),
+                          new_fig=True,
+                          label=None,
+                          bins=None,
+                          center=None,
+                          percentile=None,
+                          spacing='linear',
+                          pdf_scale=1.0,
+                          hist_kwargs={},
+                          dist_kwargs={},
+                          ignore_nan=False):
+        # Check input data. Should be 1D vector.
+        if isinstance(x, list):
+            x = np.array(x)
+        if not isinstance(x, np.ndarray):
+            raise SyntaxError('x must be numpy array.')
+        elif x.ndim > 1:
+            raise SyntaxError('x must be a 1D array.')
+        if ignore_nan:
+            x = x[~np.isnan(x)]
+
+        # Check model attributes.
+        if not isinstance(model, ephys.Distribution):
+            warnings.warn('model is not instance of the Distribution class.'
+                          + ' Unexpected behavior may occur.')
+        elif not (callable(getattr(model, 'fit', None)) and
+                  callable(getattr(model, 'pdf', None))):
+            raise SyntaxError('model must have fit() and pdf() methods.')
+
+        # Create new figure.
+        if new_fig:
+            self.create_new_figure(figsize=figsize)
+        
+        # Plot histogram of data.
+        self.ax.hist(x,
+                     bins=bins,
+                     color=self.cmap(c),
+                     label=label,
+                     **hist_kwargs)
+    
+        # Plot fitted distribution.
+        model.fit(x)
+        if spacing == 'linear':
+            t = np.linspace(x.min(), x.max(), num=1000)
+        elif spacing == 'geometric':
+            t = np.geomspace(x.min(), x.max(), num=1000)
+        else:
+            raise ValueError(f'Unknown spacing \'{spacing}\'.')
+        pdf = pdf_scale*model.pdf(t)
+        self.ax.plot(t, pdf,
+                     color=self.cmap(c),
+                     **dist_kwargs)
+        self.ax.fill_between(t, pdf,
+                             color=self.cmap(c),
+                             alpha=0.3)
+        
+        # Plot center metric if specified.
+        if center is not None:
+            if center == 'mean':
+                x_center = x.mean()
+            elif center == 'median':
+                x_center = np.median(x)
+            elif center == 'gmean':
+                x_center = np.exp(np.mean(np.log(x)))
+            else:
+                raise ValueError('Unknown center \'{}\'.'.format(center))
+            self.ax.vlines(x_center, 
+                           ymin=0.0, 
+                           ymax=pdf_scale*model.pdf(np.array([x_center])),
+                           color=self.cmap(c),
+                           **dist_kwargs)
+        elif percentile is not None:
+            if percentile < 0.0 or percentile > 100.0:
+                raise ValueError('percentile must be between 0 and 100.')
+            x_p = np.percentile(x, percentile, interpolation='linear')
+            self.ax.vlines(x_p, 
+                           ymin=0.0, 
+                           ymax=pdf_scale*model.pdf(np.array([x_p])),
+                           color=self.cmap(c),
+                           **dist_kwargs)
 
     def save_figure(self, filepath, ext='pdf', dpi=None):
         plt.savefig(filepath, format=ext, dpi=dpi)

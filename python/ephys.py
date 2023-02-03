@@ -690,16 +690,50 @@ def _kernel_smoothing(counts,
                       axis=0,
                       kernel=None,
                       kernel_type='Gaussian',
+                      ignore_invalid=False,
+                      padding_type=None,
+                      padding_length=0.0,
                       **kwargs):
     
     # Create kernel if not provided
     if kernel is None:
         kernel = _create_smoothing_kernel(kernel_type, dt_bin ,**kwargs)
         
-    # Smooth counts by convolving with kernel
-    n_smooth = _convolve(counts, kernel, axis=axis)
+    # Create padding if desired
+    if padding_type is not None:
+        if counts.ndim > 1:
+            raise SyntaxError('Padding for multidimensional data not currently supported.')
+        
+        # Offer options similar to MATLAB:
+        # https://www.mathworks.com/help/images/ref/imfilter.html#btsmcj2-3
+        n_pad = round(padding_length/dt_bin)
+        if not isinstance(padding_type, str):
+            # Assume scalar provided.
+            pad = padding_type*np.ones([2, n_pad])
+        elif padding_type == 'symmetric':
+            # Mirror edges.
+            pad = np.vstack([counts[:n_pad:-1], 
+                             counts[-n_pad::-1]])
+        elif padding_type == 'replicate':
+            # Extend edges.
+            pad = np.vstack([np.ones([n_pad])*counts[0],
+                             np.ones([n_pad])*counts[-1]])
+        elif padding_type == 'circular':
+            # Assume circular array.
+            pad = np.vstack([counts[-n_pad:],
+                             counts[:n_pad]])
+        else:
+            raise ValueError(f'Unknown padding type \'{padding_type}\'.')
+
+        # Pad array.
+        counts = np.hstack([pad[0,:], counts, pad[1,:]])
+    else:
+        n_pad = 0
     
-    return n_smooth
+    # Smooth counts by convolving with kernel
+    n_smooth = _convolve(counts, kernel, axis=axis, ignore_invalid=ignore_invalid)
+    
+    return n_smooth[n_pad:len(n_smooth)-n_pad]
     
 
 def _create_smoothing_kernel(kernel_type, dt_bin, **kwargs):
@@ -711,7 +745,7 @@ def _create_smoothing_kernel(kernel_type, dt_bin, **kwargs):
         raise SyntaxError('Unknown kernel type "%s".' % kernel_type)
 
     
-def _convolve(x, k, axis=0):
+def _convolve(x, k, axis=0, ignore_invalid=False):
     if axis < 0:
         axis = x.ndim + axis
     a = axis
@@ -719,9 +753,14 @@ def _convolve(x, k, axis=0):
     x_smooth = np.zeros(x.shape)
     for i in range(x.shape[axis]):
         slc = tuple([slice(None)]*a + [i] + [slice(None)]*b)
-        idx = np.arange(x.shape[axis]) - i # zero-center mean
-        k_i = k(idx)[tuple([np.newaxis]*a + [slice(None)] + [np.newaxis]*b)]
-        x_smooth[slc] = np.sum(k_i * x, axis=axis)
+        k_i = k(np.arange(x.shape[axis]) - i) # zero-center mean
+        k_i /= np.sum(k_i) # normalize kernel weights
+        k_i = k_i[tuple([np.newaxis]*a + [slice(None)] + [np.newaxis]*b)] # broadcast shape
+        if ignore_invalid:
+            with np.errstate(invalid='ignore'):
+                x_smooth[slc] = np.sum(np.ma.masked_invalid(k_i*x), axis=axis)
+        else:
+            x_smooth[slc] = np.sum(k_i * x, axis=axis)
     
     return x_smooth
 
@@ -1488,6 +1527,7 @@ class GPFA(LatentModel):
         
         return tau_max, _gpfa_update_K(sigma_f, sigma_n, tau_max)
 
+    @staticmethod
     def _neg_logE_XY(log_tau, sigma_f, sigma_n, E_xiTxi, return_grad=False):
         # Inverse log transformation
         tau_i = np.exp(log_tau)
@@ -1978,7 +2018,7 @@ class Gaussian(Distribution):
         m = X.shape[1] # number of dimensions
         
         if self._den == None:
-            self._den = np.sqrt(np.pi**m * np.linalg.det(self._Sigma))
+            self._den = np.sqrt((2.0*np.pi)**m * np.linalg.det(self._Sigma))
         if self._Sigma_inv is None:
             self._Sigma_inv = np.linalg.inv(self._Sigma)
         num = np.exp(-0.5*np.diag((X - self._mu).dot(self._Sigma_inv.dot((X - self._mu).T))))
@@ -2035,6 +2075,59 @@ class Gaussian(Distribution):
         # Calculate Mahalanobis distance
         return np.sqrt(np.diag((X - self._mu).dot(self._Sigma_inv.dot((X - self._mu).T))))
     
+    def contour(self, t, percentile=0.95):
+        """
+        Generate the level curve (ellipsoid) corresponding to the confidence interval
+        given by percentile. The ellipsoid is given by the equation:
+
+        (x - mu)^T Sigma^-1 (x - mu) = c^2
+
+        where c^2 follows a chi-squared distribution with m degrees of freedom:
+
+        c^2 ~ chi_m^2(percentile)
+
+        For a bivariate (m=2) distribution, the parametric equation is:
+
+        x1' = c/sqrt(lam1) cos(t)
+        x2' = c/sqrt(lam2) sin(t)
+
+        where lam1, lam2 are the eigenvalues from the eigendecomposition of Sigma^-1,
+        U diag(lam) U^T, and x' = U^T(x - mu) (or in matrix form, X' = (X - mu)U ).
+
+        Args:
+        - t: Angle in radians for parametric equation.
+        - percentile: Probability that random sample will fall within ellipse.
+
+        Returns:
+        - Xp: Matrix of shape [N, m] containing points of the ellipsoid that 
+          correspond to t.
+        """
+        # First, determine value of level set. The Mahalanobis distance of a random
+        # sample in R^d from the mean follows a chi-squared distribution with d degrees
+        # of freedom.
+        c2 = stats.chi2.ppf(percentile, 2)
+
+        # Next, get eigendecomposition of the covariance matrix
+        # Note that while the proof generally use the precision matrix
+        # (i.e. inverse of covariance matrix), the only difference between 
+        # using the two matrices is that eigenvalues are reciprocals. Thus
+        # this saves us an extra step of (potentially costly) matrix inversion.
+        lam, U = np.linalg.eig(self._Sigma)
+
+        # Get values of elliptical parameters.
+        a = (c2*lam[0])**0.5
+        b = (c2*lam[1])**0.5
+
+        # Compute elliptical coordinates in transformed system.
+        Xp_tf = np.vstack([a*np.cos(t), b*np.sin(t)]).T
+
+        # Transform elliptical coordinates into original system. Note in matrix
+        # form this becomes X = X'(U^-1) + mu = X'(U^T) + mu .
+        Xp = Xp_tf.dot(U.T) + self._mu
+        
+        return Xp
+
+
     def get_statistic(self, X, distribution='beta'):
         """
         Get the statistic of a set of observations X relative to the fit distribution.
@@ -2145,7 +2238,25 @@ class LogGaussian(Gaussian):
     def __init__(self, **kwargs):
         """
         Creates log-Gaussian distribution, in which the log-transformed
-        data is fit to a (multivariate) normal distribution.
+        data is fit to a normal distribution. Note that the log-normal 
+        distribution essentially fits the parameters (mean, variance) to
+        log-transformed data, but then has a modified pdf due to the 
+        logarithmic transformation:
+
+        ln(X) = Y ~ N(mu, sigma**2)
+        f(x) = (1/x) f(ln(x))
+
+        that is, the pdf is obtained by treating the log-transformed data
+        as a normal distribution, with an additional scaling factor of (1/x).
+        For a multivariate distribution, this extends to prod_i(1/x_i). See
+        here for more details:
+        https://stats.stackexchange.com/a/296843/355903
+        https://stats.stackexchange.com/a/297559/355903
+        https://stats.stackexchange.com/q/65998/355903
+
+
+        Because the cdf integrates out these differences, there is no scaling
+        factor.
         """
         super().__init__(**kwargs)
         self._name = 'log-gaussian'
@@ -2168,6 +2279,27 @@ class LogGaussian(Gaussian):
             return X
         else:
             raise SyntaxError('Data shape of [' + ','.join([str(n) for n in X.shape]) + '] not understood.')
+
+    def _pdf(self, X):
+        """
+        Override pdf of normal distribution by applying (1/x) scaling factor.
+        """
+        # Format data (apply log-transformation)
+        X = self._format_data(X)
+        
+        # Get data shape.
+        N = X.shape[0] # number of samples
+        m = X.shape[1] # number of dimensions
+        
+        # Compute denominator and Sigma**-1
+        if self._den == None:
+            self._den = np.sqrt((2.0*np.pi)**m * np.linalg.det(self._Sigma))
+        if self._Sigma_inv is None:
+            self._Sigma_inv = np.linalg.inv(self._Sigma)
+        num = np.exp(-0.5*np.diag((X - self._mu).dot(self._Sigma_inv.dot((X - self._mu).T))))
+        
+        # Return pdf, noting that the scaling factor is prod_i(1/x_i).
+        return num / (np.prod(np.exp(X), axis=1)*self._den)
 
 
 ### Classification models ###
@@ -2229,12 +2361,13 @@ class Model:
 class LinearRegression(Model):
     PARAM_NAMES = ['w']
 
-    def __init__(self):
+    def __init__(self, use_bias=True):
         super().__init__()
         self._name = 'linear-regression'
 
         # Set parameters
         self._w = None
+        self.use_bias = use_bias
 
     def _params(self):
         return {'w': self._w}
@@ -2250,12 +2383,14 @@ class LinearRegression(Model):
 
         # Fit weights using least-squares regression:
         # w = (X^T X )^-1 X^T y
-        X = np.hstack([X, np.ones([N, 1])]) # add bias term
+        if self.use_bias:
+            X = np.hstack([X, np.ones([N, 1])]) # add bias term
         self._w = np.linalg.inv(X.T.dot(X)).dot(X.T.dot(y))
 
     def _predict(self, X):
         N = X.shape[0]
-        X = np.hstack([X, np.ones([N, 1])]) # add bias term
+        if self.use_bias:
+            X = np.hstack([X, np.ones([N, 1])]) # add bias term
         return X.dot(self._w)
 
     def _goodness_of_fit(self, X, y, method='r_squared'):
@@ -2268,11 +2403,14 @@ class LinearRegression(Model):
         
         # Compute components 
         # (see e.g. https://online.stat.psu.edu/stat462/node/95/)
-        y_hat = self.predict(X)
-        y_mean = np.mean(y, axis=0)
-        SSR = np.sum((y_hat - y_mean)**2) # regression sum of squares
-        SST = np.sum((y - y_mean)**2) # total sum of squares
-        return SSR/SST
+        if method == 'r_squared':
+            y_hat = self.predict(X)
+            y_mean = np.mean(y, axis=0)
+            SSR = np.sum((y_hat - y_mean)**2) # regression sum of squares
+            SST = np.sum((y - y_mean)**2) # total sum of squares
+            return SSR/SST
+        else:
+            raise ValueError('Unknown method \'{}\'.'.format(method))
 
 
 class KMeans(Model):
@@ -2394,17 +2532,33 @@ class GaussianMixture(Model):
         self._m = X.shape[1]
         
         # Initialization:
-        # - Find mu_k via k-means
-        # - Find Sigma_k from all points in cluster k
-        kmeans = KMeans(self._k)
-        kmeans.fit(X, init_method='data', verbose=False)
-        labels = kmeans.predict(X) # initial cluster labels
         self._models = [] # Gaussian models ~ N(mu_k, Sigma_k)
-        for label in np.unique(labels):
-            idx = np.argwhere(labels == label).flatten()
+        if init_method == 'kmeans':
+            # Via k-means:
+            # - Find mu_k via k-means
+            # - Find Sigma_k from all points in cluster k
+            kmeans = KMeans(self._k)
+            kmeans.fit(X, init_method='data', verbose=False)
+            labels = kmeans.predict(X) # initial cluster labels
+            for label in np.unique(labels):
+                idx = np.argwhere(labels == label).flatten()
+                model = Gaussian()
+                model.fit(X[idx, :])
+                self._models.append(model)
+        elif init_method == 'random':
+            # Via randomization:
+            # - Set mu_k as random data point
+            # - Set Sigma_k as covariance of all data
             model = Gaussian()
-            model.fit(X[idx, :])
-            self._models.append(model)
+            model.fit(X)
+            Sigma = model._Sigma
+            idx = np.random.choice(np.arange(N), size=self._k)
+            for i in idx:
+                model = Gaussian()
+                model._m = X.shape[1]
+                model._mu = X[i, :]
+                model._Sigma = Sigma
+                self._models.append(model)
         self._pi = np.ones([self._k])/self._k # uniform priors
             
         # EM algorithm
@@ -2440,7 +2594,7 @@ class GaussianMixture(Model):
             i += 1
 
         if (i == max_iters) and verbose:
-            print('Converged after %d iterations.' % (i))
+            print('Max iterations reached.' % (i))
             
     def _expectation(self, X):
         # Get shape

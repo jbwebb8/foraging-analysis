@@ -383,7 +383,8 @@ class GoogleDriveService:
                       mime_type=None,
                       exact_match=False,
                       parent=None,
-                      ignore_trash=True):
+                      ignore_trash=True,
+                      **kwargs):
         """
         Search for file IDs given criteria. Remember that folders are considered
         files with the MIME type 'application/vnd.google-apps.folder'.
@@ -443,7 +444,7 @@ class GoogleDriveService:
 
         # Query for files
         if len(q) > 0:
-            files = self._service.files().list(q=q).execute()['files']
+            files = self._service.files().list(q=q, **kwargs).execute()['files']
         else:
             raise SyntaxError('Empty query string.')
         
@@ -458,12 +459,14 @@ class GoogleDriveService:
                      unique=False, 
                      mime_type=None,
                      exact_match=False,
-                     parent=None):
+                     parent=None,
+                     **kwargs):
         # Get file IDs containing filename
         file_ids = self._get_file_ids(filename=filename, 
                                       mime_type=mime_type,
                                       exact_match=exact_match,
-                                      parent=parent)
+                                      parent=parent,
+                                      **kwargs)
         
         if (len(file_ids) > 1) and unique:
             raise SyntaxError('Multiple files matching \'%s\'. Please specify.' % filename)
@@ -775,7 +778,7 @@ def find_data(mouse_id, files, ext='.mat', exclude_strs=[]):
                 exclude = True
                 break
         if (f.lower().endswith(ext)
-            and mouse_id in f.lower()
+            and mouse_id.lower() in f.lower()
             and not exclude):
             filelist.append(f)
 
@@ -1463,3 +1466,86 @@ class VideoReader:
             except TimeoutExpired:
                 self._sp.kill()
                 outs, errs = self._sp.communicate()
+
+
+class MultiprocessManager:
+
+    def __init__(self, max_workers=None, verbose=False):
+        """
+        Creates class to handle pooled multiprocessing applications. Essentially,
+        this borrows from the multiprocessing code in the VideoAnnotator class
+        to modularize running parallel processes.
+        """
+        if max_workers is None:
+            self.max_workers = os.cpu_count() - 2
+        else:
+            self.max_workers = max_workers
+        self.verbose = verbose
+
+    def run(self, func, *iters, names=None, **kwargs):
+        # Determine number of processes
+        assert all([len(arg) == len(iters[0]) for arg in iters])
+        num_processes = len(iters[0])
+        if names is None:
+            names = [i for i in range(num_processes)]
+        success = True # all processes exited successfully
+
+        # Initialize workers
+        workers = [] # list of current jobs
+        n = 0 # job number
+        for i in range(min(self.max_workers, num_processes)):
+            p = mp.Process(target=func, 
+                           args=tuple(arg[n] for arg in iters),
+                           kwargs=kwargs,
+                           name=names[n])
+            if self.verbose:
+                print('starting process {}'.format(p.name))
+            p.start()
+            workers.append(p)
+            n += 1
+
+        while True:
+            # Check for finished jobs
+            for i, p in enumerate(workers):
+                if p.exitcode is not None: # process finished
+                    # Handle termination status
+                    if p.exitcode == 0 and self.verbose:
+                        print('finished process {}'
+                              .format(p.name))
+                    elif p.exitcode < 0:
+                        print('killed process {} with signal {}'
+                              .format(p.name, -p.exitcode))
+                        success = False
+                    elif p.exitcode > 0:
+                        print('process {} exited with error code {}'
+                              .format(p.name, p.exitcode))
+                        success = False
+
+                    if n < num_processes:
+                        # Delete finished process
+                        del p
+
+                        # Add next process
+                        p = mp.Process(target=func, 
+                                       args=tuple(arg[n] for arg in iters),
+                                       kwargs=kwargs,
+                                       name=names[n])
+                        if self.verbose:
+                            print('starting process {}'.format(p.name))
+                        p.start()
+                        workers[i] = p
+                        n += 1
+                    else:
+                        # Delete finished process and trim list
+                        del workers[i]
+
+            # Stop when no more jobs remain
+            if len(workers) == 0:
+                break
+
+        if self.verbose:
+            print('done.')
+        
+        return success
+
+        

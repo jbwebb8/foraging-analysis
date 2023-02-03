@@ -6,10 +6,12 @@ warnings.simplefilter('ignore', category=FutureWarning)
 import h5py
 import re
 import pickle
+import math
 import numpy as np
 from scipy.interpolate import interp1d
 from helper import smooth_waveform_variance, find_threshold, \
-                   cumulative_reward, get_optimal_values, compare_patch_times
+                   cumulative_reward, get_optimal_values, compare_patch_times, \
+                   smooth_waveform_power_ratio
 from util import in_interval, _check_list, dec_to_bin_array, flatten_list
 from ephys import LinearRegression
 
@@ -37,6 +39,18 @@ class Session:
         self.data = {}
         self.vars = {}
 
+        # Set condition ID
+        self.condition = None
+
+        # Set verbosity
+        self.verbose = 1
+
+    def set_verbosity(self, level):
+        """ Set verbosity level of activity. """
+        if level < 0 or level > 3:
+            raise ValueError('Verbosity must be between 0 and 3.')
+        self.verbose = level
+
     @property
     def n_patches(self):
         """
@@ -55,7 +69,10 @@ class Session:
         req_vars = ['T']
         self._check_attributes(var_names=req_vars)
 
-        return self.vars['T']
+        return self._get_total_time()
+    
+    def _get_total_time(self):
+        raise NotImplementedError
 
     @property
     def analyzed_time(self):
@@ -85,17 +102,17 @@ class Session:
         if names is not None:
             names = _check_list(names)
             for name in names:
-                _ = self.data.pop(name)
+                _ = self.data.pop(name, None)
         else:
             self.data = {}
 
-    def load_vars(self, names):
+    def load_vars(self, names, **kwargs):
         if not isinstance(names, list):
             names = [names]
         for name in names:
             if name in self.var_names:
                 if name not in self.vars.keys():
-                    self.vars[name] = self._load_var(name)
+                    self.vars[name] = self._load_var(name, **kwargs)
             else:
                 raise SyntaxError('Variable name \'%s\' not recognized.' % name)
 
@@ -106,15 +123,15 @@ class Session:
         if names is not None:
             names = _check_list(names)
             for name in names:
-                _ = self.vars.pop(name)
+                _ = self.vars.pop(name, None)
         else:
             self.vars = {}
 
-    def _check_attributes(self, data_names=None, var_names=None):
+    def _check_attributes(self, data_names=None, var_names=None, **kwargs):
         if data_names is not None:
             self.load_data(data_names)
         if var_names is not None:
-            self.load_vars(var_names)
+            self.load_vars(var_names, **kwargs)
         if self.vars.get('t_stop', 1.0) <= 0.0:
             raise UserWarning('Unanalyzable session: not enough patches.')
 
@@ -205,12 +222,17 @@ class Session:
 
         return np.squeeze(np.diff(t_interpatch, axis=1))
 
-    def get_motor_times(self, var_name='t_motor'):
+    def get_motor_times(self, var_name='t_motor', per_patch=False, relative=False):
         # Requirements
         req_vars = [var_name]
         self._check_attributes(var_names=req_vars)
 
-        return self.vars[var_name]
+        if per_patch:
+            if var_name != 't_motor':
+                raise ValueError('Per patch times do not exist for {}.'.format(var_name))
+            return self._get_event_times_per_patch(var_name=var_name, relative=relative)
+        else:
+            return self.vars[var_name]
     
     def _get_motor_times(self, var_name='t_motor'):
         # Requirements
@@ -250,6 +272,49 @@ class Session:
 
         else:
             raise ValueError('Name \'%s\' not recognized.' % var_name)
+    
+    def _get_event_times_per_patch(self, 
+                                   var_name, 
+                                   relative=False, 
+                                   return_indices=False, 
+                                   pad=0.5):
+        """
+        Returns list of event times for each patch, 
+        such as motor or lick events.
+        """
+        # Requirements
+        req_vars = ['t_patch', var_name]
+        self._check_attributes(var_names=req_vars)
+
+        # Find patches in which events occurred
+        t_var = np.copy(self.vars[var_name])
+        _, idx_patch = in_interval(t_var,
+                                   self.vars['t_patch'][:, 0]-pad,
+                                   self.vars['t_patch'][:, 1]+pad,
+                                   query='event_interval')
+        n_patch = in_interval(t_var,
+                              self.vars['t_patch'][:, 0]-pad,
+                              self.vars['t_patch'][:, 1]+pad,
+                              query='event')
+        if var_name == 't_motor' and (n_patch > 1).any():
+            raise UserWarning('Motor times cannot be uniquely assigned'
+                              ' to individual patches.')
+        if np.sum(n_patch == 0) > 0:
+            t_var = t_var[n_patch > 0]
+            warnings.warn('Some events occurred outside of patches. Ignoring...',
+                          category=UserWarning)
+        
+        # Create list of event times
+        t_event = []
+        for i in range(self.n_patches):
+            t_event.append(t_var[idx_patch == i] 
+                           - int(relative)*self.vars['t_patch'][i, 0])
+        
+        # Return results
+        if return_indices:
+            return t_event, idx_patch, (n_patch > 0)
+        else:
+            return t_event
 
     def _find_threshold_crossings(self, y, thresh):
         # Find where signal > thresh
@@ -266,14 +331,17 @@ class Session:
 
         return is_on, idx_on_start, idx_on_end
 
-    def get_lick_times(self):
+    def get_lick_times(self, per_patch=False, relative=False, thresh=None):
         # Requirements
         req_vars = ['t_lick']
-        self._check_attributes(var_names=req_vars)
+        self._check_attributes(var_names=req_vars, thresh=thresh)
 
-        return self.vars['t_lick']
+        if per_patch:
+            return self._get_event_times_per_patch('t_lick', relative=relative, pad=0.5)
+        else:
+            return self.vars['t_lick']
     
-    def _get_lick_times(self):
+    def _get_lick_times(self, thresh=None):
         # Requirements
         req_data = ['lick', 'fs']
         req_vars = ['t_stop']
@@ -282,7 +350,8 @@ class Session:
         # Find lick timestamps
         idx_stop = int(self.vars['t_stop'] * self.data['fs'])
         lick = self.data['lick'][:idx_stop]
-        thresh = np.max(lick) / 2.0
+        if thresh is None:
+            thresh = np.max(lick) / 2.0
         idx_licking = (lick > thresh).astype(np.int32)
         idx_lick = (np.argwhere((idx_licking - np.roll(idx_licking, -1)) == -1) + 1).flatten()
         t_lick = idx_lick / self.data['fs']
@@ -340,19 +409,9 @@ class Session:
             #r_motor = lambda dt: m*dt - m*np.max(self.vars['dt_motor']) + np.max(r_log)
 
             # Find patches in which rewards given
-            pad = 0.5 # padding in seconds
-            _, idx_patch = in_interval(self.vars['t_motor'],
-                                       self.vars['t_patch'][:, 0]-pad,
-                                       self.vars['t_patch'][:, 1]+pad,
-                                       query='event_interval')
-            n_patch = in_interval(self.vars['t_motor'],
-                                  self.vars['t_patch'][:, 0]-pad,
-                                  self.vars['t_patch'][:, 1]+pad,
-                                  query='event')
-            if (n_patch > 1).any():
-                raise UserWarning('Motor times cannot be uniquely assigned'
-                                  ' to individual patches.')
-
+            _, idx_patch, idx_keep = \
+                self._get_event_times_per_patch('t_motor', return_indices=True)
+            r_log = r_log[idx_keep] # ignore events outside patches (e.g. technical error)
 
             # Calculate observed reward per patch
             r_patch_obs = np.zeros(self.vars['t_patch'].shape[0])
@@ -455,6 +514,13 @@ class TTSession(Session):
     def day(self):
         return self.params['Info'].get('Session', -1)
 
+    def _get_total_time(self):
+        # Requirements
+        req_vars = ['T']
+        self._check_attributes(var_names=req_vars)
+
+        return self.vars['T']/self.SAMPLING_RATE
+
     def _load_data(self, name):
         if name == 'motor':
             return self._load_motor_data()
@@ -481,7 +547,7 @@ class TTSession(Session):
         elif name == 't_os':
             return self.raw_data[:, self.params['Data']['ComputerTime']]
 
-    def _load_var(self, name):
+    def _load_var(self, name, **kwargs):
         if name == 'T':
             return self.raw_data.shape[0]
         elif name in ['t_patch', 'in_patch', 't_stop']:
@@ -489,7 +555,7 @@ class TTSession(Session):
         elif name in ['t_motor', 'dt_motor', 'n_motor_rem', 't_motor_all']:
             return self._get_motor_times(name)
         elif name == 't_lick':
-            return self._get_lick_times()
+            return self._get_lick_times(**kwargs)
         else:
             raise SyntaxError('Unknown variable name \'%s\'.' % name)
     
@@ -588,7 +654,11 @@ class TTSession(Session):
         else:
             raise ValueError('Name \'%s\' not recognized.' % var_name)
 
-    def _get_patch_times_from_GPIO(self, fs=None, GPIO_labels=None, alternate=True):
+    def _get_patch_times_from_GPIO(self, 
+                                   fs=None, 
+                                   GPIO_labels=None, 
+                                   alternate=True, 
+                                   return_ids=False):
         # Check requirements
         req_data = ['GPIO', 'fs']
         self._check_attributes(data_names=req_data)
@@ -654,8 +724,15 @@ class TTSession(Session):
         # Drop last patch-interpatch sequence
         t_stop = t_patch[-1, 0]
         t_patch = t_patch[:-1, :]
+        idx_patch = idx_patch[:-1]
 
-        return t_patch, in_patch, t_stop
+        if return_ids:
+            return np.asarray([pins[i] for i in idx_patch]), pins
+        else:
+            return t_patch, in_patch, t_stop
+
+    def get_patch_ids(self, **kwargs):
+        return self._get_patch_times_from_GPIO(return_ids=True, **kwargs)
 
     def _smooth_patch_times(self, t_patch):
         """Applies nose poke sensor smoothing to patch entry/exit."""
@@ -765,8 +842,12 @@ class TTSession(Session):
                 # Otherwise, jump to next patch
                 i += 2
         
-        # Return trimmed patch times as [N x 2] array
-        return np.array(t_patch).reshape([-1, 2], order='C')
+        # Reshape trimmed patch times to [N x 2] array. Remove entry delay
+        # from patch start time.
+        t_patch = np.array(t_patch).reshape([-1, 2], order='C')
+        assert (np.diff(t_patch, axis=1) >= entry_delay).all()
+        t_patch[:, 0] += entry_delay
+        return t_patch
 
     def save(self, filepath):
         """
@@ -811,16 +892,26 @@ class TTSession(Session):
                 r_0 = self.params['Reward']['r_0']
                 tau = self.params['Reward']['tau']
             else:
-                # Search through state machine
+                # Search through state machine for parameter sets
                 R_0 = np.array([0.0])
                 r_0 = []
                 tau = []
+                pins = []
                 for state, state_params in self.params['StateMachine']['States'].items():
                     if state_params.get('Type', None) == 'Patch':
+                        # Get parameter values
                         V_0 = state_params['Params']['ModelParams']['V0']
                         lambda_0 = state_params['Params']['ModelParams']['lambda0']
                         r_0.append(V_0*lambda_0)
                         tau.append(state_params['Params']['ModelParams']['tau'])
+                        
+                        # Find reward pin associated with patch type
+                        for next_state, next_state_params in state_params['NextState'].items():
+                            if next_state_params.get('ConditionType', None) == 'Reward':
+                                for ns, params in self.params['StateMachine']['States'][next_state]['NextState'].items():
+                                    if self.params['StateMachine']['States'][ns]['Type'] == 'Reward':
+                                        pin = self._get_GPIO_pins(self.params['StateMachine']['States'][ns]['Params']['DispensePin'])
+                                        pins.append(pin)
                 
                 # Convert to 1D arrays
                 if len(r_0) == 0 or len(tau) == 0:
@@ -828,11 +919,13 @@ class TTSession(Session):
                 else:
                     r_0 = np.asarray(r_0)
                     tau = np.asarray(tau)
+                    pins = np.asarray(pins)
 
                 # Find unique parameter sets
                 _, keep_idx = np.unique(np.vstack((r_0, tau)), return_index=True, axis=1)
                 r_0 = r_0[keep_idx]
                 tau = tau[keep_idx]
+                pins = pins[keep_idx]
 
                 # Broadcast other parameters to same array shape
                 assert r_0.shape == tau.shape
@@ -842,14 +935,37 @@ class TTSession(Session):
         except KeyError:
             raise UserWarning('Reward depletion parameters not specified.')
 
-        # Minimum travel time: R_0 / r_0
+        # Compute optimal values
         multipatch = (len(r_0) > 1)
         t_p_opt, r_opt = get_optimal_values(t_t=t_t_min, 
                                             R_0=R_0, 
                                             r_0=r_0, 
                                             tau=tau, 
                                             multipatch=multipatch)
-        
+        t_p_opt = t_p_opt.squeeze()
+        r_opt = r_opt.squeeze()
+
+        if per_patch:
+            # If multiple patch types, assign value to each patch based on type
+            if multipatch:
+                t = np.zeros([self.n_patches])
+                r = np.zeros([self.n_patches])
+                patch_ids, pins = self.get_patch_ids()
+                for i, pin in enumerate(pins):
+                    idx = np.argwhere(patch_ids == pin).flatten()
+                    t[idx] = t_p_opt[i]
+                    r[idx] = r_opt[i]
+                t_p_opt = t
+                r_opt = r
+            
+            # Otherwise, broadcast to number of patches
+            else:
+                t_p_opt = t_p_opt*np.ones([self.n_patches])
+                r_opt = r_opt*np.ones([self.n_patches])
+
+        if multipatch:
+            t_t_min = t_t_min[0] # undo broadcasting in earlier step
+
         if return_all:
             return r_opt / (t_p_opt + t_t_min), r_opt, t_p_opt, t_t_min
         else:
@@ -860,21 +976,26 @@ class TTSession(Session):
         Calculate the reward times within a patch by integrating
         an exponential decay function.
         """
-        # Parameters
-        tau = self.params['Reward']['tau']
-        r_0 = self.params['Reward']['r_0']
-        R_0 = self.params['Reward']['R_0']
+        if self.version < 1.0:
+            # Parameters
+            tau = self.params['Reward']['tau']
+            r_0 = self.params['Reward']['r_0']
+            R_0 = self.params['Reward']['R_0']
 
-        # Calculate pre-determined reward times
-        n = np.arange(int(tau*r_0/R_0)) # max number of rewards
-        t_reward = -tau*np.log(1.0 - (n*R_0)/(tau*r_0)) # seconds
+            # Calculate pre-determined reward times
+            n = np.arange(int(tau*r_0/R_0)) # max number of rewards
+            t_reward = -tau*np.log(1.0 - (n*R_0)/(tau*r_0)) # seconds
 
-        # Add task-specific delays
-        t_reward += (self.params['Delay']['FirstBetweenDispensingDelay']
-                    + np.arange(1, len(n)+1) * self.params['Delay']['PreDispenseToneDelay']
-                    + np.arange(0, len(n))   * sum([self.params['Delay']['PostDispenseDelay'], self.params['Delay']['PostDispenseToneDelay']]))/1000
-        
-        return t_reward
+            # Add task-specific delays
+            t_reward += (self.params['Delay']['FirstBetweenDispensingDelay']
+                        + np.arange(1, len(n)+1) * self.params['Delay']['PreDispenseToneDelay']
+                        + np.arange(0, len(n))   * sum([self.params['Delay']['PostDispenseDelay'], self.params['Delay']['PostDispenseToneDelay']]))/1000
+            
+            return t_reward
+
+        else:
+            raise NotImplementedError('Reward time calculation not implemented '
+                                      'for Poisson drip task.')
 
 
 class LVSession(Session):
@@ -889,11 +1010,29 @@ class LVSession(Session):
 
         Session.__init__(self)
 
+        # Specify whether patch entry, exit, or both align between sound and wheel.
+        self.ALIGN_PATCH_ENTRY = True
+        self.ALIGN_PATCH_EXIT = True
+        self.WHEEL_AFTER_SOUND_PATCH_ENTRY = False # sound comes before wheel-defined entry
+
+        # Set default parameters for preprocessing sound waveform to estimate
+        # patch times.
+        self._sound_kwargs = [{'med_filter_size': 30, 
+                               'butter_filter_fc': 10}]
+
+        # Placeholder for list of failed computations.
+        self._failed_vars = []
+
+        # Placeholder for clock drift model and unaligned calculations from
+        # the wheel data.
+        self.drift_model = None
+        self._wheel_cache = {}
+
         # Load from original data
         if filename is not None:
             # Get filename
             self.filename = filename
-            self.f = h5py.File(filename)
+            self.f = h5py.File(filename, 'r')
             self.pupil_filepath = pupil_filepath
 
             # Set global attributes
@@ -903,10 +1042,11 @@ class LVSession(Session):
             if match is not None:
                 day = day[:match.span()[0]]
             self.day = int(day)
-            self.data_names += ['sound', 'cam', 'wheel_time',
+            self.data_names += ['sound', 'cam', 'wheel_time', 'fs_wheel',
                                 'wheel_speed', 'wheel_position', 'dt_patch']
             self.var_names += ['s_var', 'fs_s', 't_s', 't_wheel', 'v_smooth', 
-                               'd_pupil', 't_pupil']
+                               'd_pupil', 't_pupil', 't_patch_wheel', 
+                               't_stop_wheel']
             self.settings = {}
             struct = self.f['Settings']['Property']
 
@@ -944,16 +1084,13 @@ class LVSession(Session):
                 self._ASCII_to_float(struct[s + 'AvgStartsec'])
             self.settings['target_sound']['type'] = \
                 self._ASCII_to_string(struct[s + 'TargetType'])
-
-            # Placeholder for clock drift model
-            self.drift_model = None
         
-        # Otherwise, assume loading from pickled session data
-        elif sess_filepath is not None:
+        # Load pickled session data
+        if sess_filepath is not None:
             self.load(sess_filepath)
             self.f = None
 
-        else:
+        if filename is None and sess_filepath is None:
             raise SyntaxError('filename or sess_filepath must be provided.')
 
     def _ASCII_to_float(self, s):
@@ -964,6 +1101,15 @@ class LVSession(Session):
     
     def _ASCII_to_bool(self, s):
         return bool([u''.join(chr(c) for c in s)][0])
+
+    @property
+    def chamber_number(self):
+        # Get chamber number (suffix for DAQ data)
+        chamber_id = self.settings['global']['chamber_id']
+        if 'ephys' in chamber_id.lower():
+            return '1'
+        else:
+            return self.settings['global']['chamber_id'][-1]
     
     def _load_data(self, name):
         # Check if raw data file available
@@ -973,51 +1119,60 @@ class LVSession(Session):
                     'in constructor.').format(name)
             raise UserWarning(msg)
 
-        # Get chamber number (suffix for DAQ data)
-        chamber_id = self.settings['global']['chamber_id']
-        if 'ephys' in chamber_id.lower():
-            chamber_number = '1'
-        else:
-            chamber_number = self.settings['global']['chamber_id'][-1]
-
         # Data names
         if name == 'sound':
-            return self.f['UntitledSound' + chamber_number]['Data'][0, :]
+            return self.f['UntitledSound' + self.chamber_number]['Data'][0, :]
         elif name == 'lick':
-            return self.f['UntitledLick' + chamber_number]['Data'][0, :]
+            return self.f['UntitledLick' + self.chamber_number]['Data'][0, :]
         elif name == 'motor':
-            return self.f['UntitledMotor' + chamber_number]['Data'][0, :]
+            return self.f['UntitledMotor' + self.chamber_number]['Data'][0, :]
         elif name ==  'cam':
-            return self.f['UntitledCam' + chamber_number]['Data'][0, :]
+            return self.f['UntitledCam' + self.chamber_number]['Data'][0, :]
         elif name == 'fs':
-            return 1.0 / self.f['UntitledSound' + chamber_number]['Property']['wf_increment'][0, 0]
+            return 1.0 / self.f['UntitledSound' + self.chamber_number]['Property']['wf_increment'][0, 0]
         elif name == 'wheel_speed':
             return self.f['UntitledWheelSpeed']['Data'][0, :] * 100 # cm/s
         elif name == 'wheel_time':
             return self.f['UntitledWheelTime']['Data'][0, :]
         elif name == 'wheel_position':
             return self.f['UntitledAngularPosition']['Data'][0, :] / 360 * self.WHEEL_CIRCUMFERENCE # cm
+        elif name == 'fs_wheel':
+            # NOTE: Unlike the LabVIEW DAQ, the encoder sampling rate may vary
+            # during a session. Always use the associated wheel times (raw or aligned)
+            # when using other encoder data like wheel position or velocity.
+            return float(round(1.0/np.diff(self.f['UntitledWheelTime']['Data'][0, :]).mean()))
         elif name == 'dt_patch':
-            return self.f['UntitledPatchTime']['Data'][0, :]
+            if 'UntitledPatchTime' in self.f.keys():
+                return self.f['UntitledPatchTime']['Data'][0, :]
+            else:
+                raise BadSession('Patch times not logged.')
         else:
             return self._load_subclass_data(name)
 
     def _load_subclass_data(self, name):
         pass
 
-    def _load_var(self, name):
+    def _load_var(self, name, **kwargs):
+        # Check if computation previously failed to avoid unnecessary
+        # computation time.
+        if name in self._failed_vars:
+            raise BadSession('Variable {} computation failed.'.format(name))
+        
+        # Call specific load function
         if name == 'T':
-            return self._get_total_time()
+            return self._get_total_time_from_data()
         elif name in ['t_patch', 'in_patch', 't_stop']:
-            return self._get_patch_times(name)
+            return self._get_patch_times_from_sound(name)
         elif name in ['s_var', 'fs_s', 't_s']:
-            return self.preprocess_sound(name)
-        elif name in ['t_motor', 'dt_motor', 'n_motor_rem']:
+            return self.preprocess_sound(name, **kwargs)
+        elif name in ['t_patch_wheel', 't_stop_wheel']:
+            return self._get_patch_times_from_wheel(name, **kwargs)
+        elif name in ['t_motor', 'dt_motor', 'n_motor_rem', 't_motor_all']:
             return self._get_motor_times(name)
         elif name == 't_lick':
             return self._get_lick_times()
         elif name == 't_wheel':
-            return self._get_wheel_times()
+            return self._get_wheel_times(**kwargs)
         elif name == 'v_smooth':
             return self._get_smoothed_velocity()
         elif name == 'd_pupil':
@@ -1029,17 +1184,25 @@ class LVSession(Session):
 
     def _get_total_time(self):
         # Requirements
+        req_vars = ['T']
+        self._check_attributes(var_names=req_vars)
+
+        return self.vars['T']
+
+    def _get_total_time_from_data(self):
+        # Requirements
         req_data = ['fs']
         self._check_attributes(data_names=req_data)
 
-        return self.f['UntitledSound' + chamber_number]['Total_Samples'][0, 0]/self.data['fs']
+        return self.f['UntitledSound' + self.chamber_number]['Total_Samples'][0, 0]/self.data['fs']
 
-    def preprocess_sound(self, var_name):
+    def preprocess_sound(self, var_name, **kwargs):
         required_data = ['sound', 'fs']
         self._check_attributes(data_names=required_data)
 
-        fs_s, t_s, s_var_smooth = smooth_waveform_variance(self.data['sound'], 
-                                                           self.data['fs'])
+        fs_s, t_s, s_var_smooth = self._preprocess_sound(self.data['sound'], 
+                                                         self.data['fs'],
+                                                         **kwargs)
         if var_name == 's_var':
             return s_var_smooth
         elif var_name == 'fs_s':
@@ -1049,16 +1212,30 @@ class LVSession(Session):
         else:
             raise ValueError('Name \'%s\' not recognized.' % var_name)
 
-    def _get_patch_times(self, var_name='t_patch'):
+    def _preprocess_sound(self, wf, fs, **kwargs):
+        return smooth_waveform_variance(wf, fs, **kwargs)
+
+    def _get_patch_times_from_sound(self, var_name='t_patch'):
         # Requirements
         required_data = ['dt_patch']
         self._check_attributes(data_names=required_data)
 
-        t_patch, in_patch, t_stop = \
-            self._get_patches_from_sound()
-        dt_patch = np.diff(t_patch, axis=1).flatten()
-
-        if compare_patch_times(dt_patch, self.data['dt_patch']):
+        dt_patch = None
+        for kwargs in self._sound_kwargs:
+            try:
+                self.clear_vars(names=['s_var', 'fs_s', 't_s'])
+                self.load_vars(names=['s_var', 'fs_s'], **kwargs)
+                t_patch, in_patch, t_stop = \
+                    self._get_patches_from_sound()
+                dt_patch = np.diff(t_patch, axis=1).flatten()
+                break
+            except UserWarning: # unsuitable sound preprocessing
+                pass
+        
+        if dt_patch is None:
+            self._failed_vars.append(var_name)
+            raise BadSession('Unable to compute patch durations from sound file.')
+        elif compare_patch_times(dt_patch, self.data['dt_patch']):
             if var_name == 't_patch':
                 return t_patch
             elif var_name == 'in_patch':
@@ -1068,7 +1245,7 @@ class LVSession(Session):
             else:
                 raise ValueError('Name \'%s\' not recognized.' % var_name)
         else:
-            raise UserWarning('Patch durations from sound and log file do not match.')
+            raise BadSession('Patch durations from sound and log file do not match.')
 
     def _get_patches_from_sound(self, auto_thresh=True, init_thresh=5.0e-9):
         required_data = ['dt_patch']
@@ -1090,6 +1267,7 @@ class LVSession(Session):
         t_patch, t_stop = self._get_patch_times_from_signal(in_patch, fs_s)
         dt_patch = np.diff(t_patch, axis=1).flatten()
         
+        # TODO: iterate through both threshold and parameters for smoothing function
         # Check for agreement with logged patch durations
         if not compare_patch_times(dt_patch, self.data['dt_patch']):
             #print('Initial threshold failed. Trying range of values...')
@@ -1104,30 +1282,79 @@ class LVSession(Session):
                     if compare_patch_times(dt_patch, self.data['dt_patch']):
                         #print('Successful threshold found: %.2e' % thresh)
                         break
-                except IndexError: # empty array handling
+                except (BadSession, IndexError): # empty array handling
                     pass
 
         if not compare_patch_times(dt_patch, self.data['dt_patch']):
             raise UserWarning('Unable to determine patch times from sound.')
+        elif len(dt_patch) == 0:
+            raise BadSession('No patches detected on signal or in logged data.')
                 
         return t_patch, in_patch, t_stop
 
-    def _get_patches_from_wheel(self, 
+    def get_patch_times_from_wheel(self, var_name='t_patch_wheel', **kwargs):
+        # Check var request.
+        if var_name not in ['t_patch_wheel', 't_stop_wheel']:
+            raise ValueError(f'Variable name {var_name} does not apply to function.')
+        
+        # Requirements
+        req_vars = [var_name]
+        self._check_attributes(var_names=req_vars, **kwargs)
+
+        return self.vars[var_name]
+
+    def _get_patch_times_from_wheel(self, var_name='t_patch_wheel'):
+        # Requirements
+        req_vars = ['t_wheel']
+        self._check_attributes(var_names=req_vars)
+
+        # Get corrected wheel times that are aligned to sound-defined patch
+        # events (i.e. aligned to DAQ rather than encoder clock).
+        t_wheel = self.vars['t_wheel']
+        
+        # Get indices of wheel data corresponding to wheel-defined patch events.
+        _, idx_patch, _, idx_stop = self._get_patches_from_wheel(return_idx=True)
+
+        # Return wheel-defined patch times.
+        if var_name == 't_patch_wheel':
+            # Handle NaN values
+            t_patch = np.ones(idx_patch.shape)*np.nan
+            index = ~np.isnan(idx_patch[:, 0])
+            t_patch[index] = t_wheel[idx_patch[index].astype(np.int64)]
+            return t_patch
+        elif var_name == 't_stop_wheel':
+            return t_wheel[idx_stop]
+        else:
+            raise ValueError(f'Name \'{var_name}\' not recognized.')
+
+    def _get_patches_from_wheel(self,
                                 stop_thresh=0.5,
-                                fs=200.0,
                                 return_idx=False,
                                 search_rate=1.25,
                                 max_attempts=10,
-                                atol=1.0):
+                                atol=1.5):
+        # Check for previous calculation
+        key = (stop_thresh, search_rate, atol)
+        if key in self._wheel_cache.keys():
+            t_patch_wheel   = self._wheel_cache[key]['t_patch_wheel']
+            idx_patch_wheel = self._wheel_cache[key]['idx_patch_wheel']
+            t_stop          = self._wheel_cache[key]['t_stop']
+            idx_stop        = self._wheel_cache[key]['idx_stop']
+            if return_idx:
+                return t_patch_wheel, idx_patch_wheel, t_stop, idx_stop
+            else:
+                return t_patch_wheel, t_stop
+        
         # Requirements
-        req_data = ['wheel_position', 'wheel_time']
-        req_vars = ['v_smooth', 't_patch']
+        req_data = ['wheel_position', 'wheel_time', 'fs_wheel']
+        req_vars = ['v_smooth', 't_patch', 't_stop']
         self._check_attributes(data_names=req_data, var_names=req_vars)
 
         # Load data
         v_smooth = self.vars['v_smooth']
         x_wheel = self.data['wheel_position']
         t_wheel = self.data['wheel_time']
+        fs = self.data['fs_wheel']
         t_patch_sound = self.vars['t_patch']
 
         # Session parameters
@@ -1135,25 +1362,49 @@ class LVSession(Session):
         v_stop = stop_thresh # threshold for stopping (cm/s)
 
         # NOTE: The position at patch exit must be corrected for clock drift.
-        # See the wheel_alignment notebook for details.
+        # See the wheel_alignment notebook for details. Unlike the notebook,
+        # the drift model will take wheel, not sound, timestamps as input,
+        # because it must calculate the offset based on wheel time below.
+        # NOTE: The wheel sampling rate may not be constant throughout a session.
+        # Thus, a more accurate model would compute the sample offset from the
+        # recent sampling intervals (which may deviate from, e.g., 20 ms for a
+        # 50 Hz sampling rate).
         if self.drift_model is None:
             drift_model = self._estimate_clock_drift(stop_thresh=stop_thresh)
         else:
             drift_model = self.drift_model
 
-        for n in range(max_attempts):
+        # Create parameter search values.
+        exp = np.hstack([np.arange(round(-max_attempts**0.5/2), 0),
+                         np.arange(1, round(max_attempts**0.5/2))])
+        w0 = drift_model._w[0]*np.power(search_rate, exp)
+        if drift_model._w[1, 0] > 0.1:
+            # If bias present, create search space according to search rate.
+            w1 = drift_model._w[1]*np.power(search_rate, exp)
+        else:
+            # If bias either ignored or non-significant, try searching
+            # common values.
+            w1 = np.linspace(0.2, 0.8, num=len(exp))
+        
+        # Find drift model that matches wheel- and sound-defined patches.
+        success = False
+        M_min = math.inf
+        t_patch_best = None
+        idx_patch_best = None
+        for n in range(max_attempts+1):
             # Initialize values
             in_patch = True # task starts in a patch
             x_start = 0.0 # linear position of current patch start
             t_patch_wheel = [0.0] # patch entry/exit timestamps according to wheel data
             idx_patch_wheel = [0] # indices of above timestamps
             idx_in_patch = np.zeros(v_smooth.shape[0], dtype=np.bool)
+            t_offset = 0.0 # placeholder for position offset if needed
 
             # Iterate through wheel data
             for i in range(v_smooth.shape[0]):
                 # Correct wheel position for clock drift
                 t_offset = drift_model.predict(np.array([t_wheel[i]]))
-                x_i = x_wheel[max(i - int(t_offset*fs), 0)]
+                x_i = x_wheel[min(max(i - int(t_offset*fs), 0), x_wheel.shape[0]-1)]
 
                 # Leave patch criteria:
                 # 1) in a patch
@@ -1178,58 +1429,216 @@ class LVSession(Session):
                 # Update in_patch indices
                 idx_in_patch[i] = in_patch
 
-            # Drop last patch-interpatch sequence
+            # Convert to arrays.
             t_patch_wheel = np.array(t_patch_wheel)
             idx_patch_wheel = np.array(idx_patch_wheel)
-            if t_patch_wheel.shape[0] % 2 == 1: 
-                # End in patch: drop last patch entry
-                t_stop = t_patch_wheel[-1]
-                idx_stop = idx_patch_wheel[-1]
-                t_patch_wheel = t_patch_wheel[:-1]
-                idx_patch_wheel = idx_patch_wheel[:-1]
-            else: 
-                # End in interpatch: drop last patch entry and exit
-                t_stop = t_patch_wheel[-2]
-                idx_stop = idx_patch_wheel[-2]
-                t_patch_wheel = t_patch_wheel[:-2]
-                idx_patch_wheel = idx_patch_wheel[:-2]
+
+            # Add last timestamp if end in patch. If this is incorrect,
+            # it will be fixed in the sliding window below.
+            if t_patch_wheel.shape[0] % 2 == 1:
+                t_patch_wheel = np.append(t_patch_wheel, t_wheel[-1])
+                idx_patch_wheel = np.append(idx_patch_wheel, len(t_wheel)-1)
 
             # Reshape
             t_patch_wheel = t_patch_wheel.reshape([-1, 2])
             idx_patch_wheel = idx_patch_wheel.reshape([-1, 2])
 
-            # Compare to sound patch times
-            if ((t_patch_sound.shape == t_patch_wheel.shape) and
-                (np.abs(t_patch_sound - t_patch_wheel) <= atol).all()):
+            # Compare to sound patch times. If number of patches differs, 
+            # attempt to resolve edge cases if needed by sliding equally sized
+            # window over wheel patches until match found.
+            M = t_patch_wheel.shape[0] - t_patch_sound.shape[0]
+            if M < 0 and self.verbose > 2:
+                print('Wheel data does not recognize all sound-defined'
+                       + ' patch times.')
+            elif M > 2 and self.verbose > 2:
+                print('Number of patches differs by more than two.')
+            for m in range(M+1):
+                idx = slice(m, t_patch_wheel.shape[0] - (M - m))
+                if self._compare_times(t_patch_sound, t_patch_wheel[idx, :], atol).all():
+                    # If patches dropped at end, adjust t_stop accordingly
+                    # as the entry time of the first dropped patch.
+                    if m < M and self.ALIGN_PATCH_ENTRY:
+                        t_stop = t_patch_wheel[-(M-m), 0]
+                        idx_stop = idx_patch_wheel[-(M-m), 0]
+                    else:
+                        t_stop = ((self.vars['t_stop'] - drift_model._w[1])
+                                  /(1.0 + drift_model._w[0]))
+                        idx_stop = np.nonzero(t_wheel >= min(t_stop, t_wheel.max()))[0][0]
+                        t_stop = t_wheel[idx_stop]
+
+                    # Update matched patch times.
+                    t_patch_wheel = t_patch_wheel[idx, :]
+                    idx_patch_wheel = idx_patch_wheel[idx, :]
+                    success = True
+                    break
+            
+            # Cache best estimate so far if alignment fails.
+            if abs(M) < M_min:
+                M_min = abs(M)
+                t_patch_best = np.copy(t_patch_wheel)
+                idx_patch_best = np.copy(idx_patch_wheel)
+                w_best = np.copy(drift_model._w)
+
+            # Retry with new parameters if failed.
+            if success:
                 break
-            else:
+            elif n < max_attempts:
                 w_old_str = ' '.join(['{:.3e}'.format(w[0]) for w in drift_model._w])
-                drift_model._w[0] *= search_rate
+                drift_model._w[0] = w0[(n-1)//round(max_attempts**0.5)]
+                drift_model._w[1] = w1[(n-1)%round(max_attempts**0.5)] # iterate over bias first
                 w_new_str = ' '.join(['{:.3e}'.format(w[0]) for w in drift_model._w])
-                print('Model params [{}] failed. Attempting with params [{}] ...'
-                      .format(w_old_str, w_new_str))
+                if self.verbose > 2:
+                    print('Model params [{}] failed. Attempting with params [{}] ...'
+                        .format(w_old_str, w_new_str))
 
-        # Set drift model if successful
-        if n == max_attempts - 1:
-            raise RuntimeError('Could not find accurate clock drift model.')
-        else:
+        # Set drift model if successful. Otherwise, return best estimate.
+        if success:
+            # Set new drift model.
             self.drift_model = drift_model
-            print('Found clock drift model with params [{}].'
-                  .format(' '.join(['{:.3e}'.format(w[0]) for w in drift_model._w])))
+            if self.verbose > 1:
+                print('Found clock drift model with params [{}].'
+                    .format(' '.join(['{:.3e}'.format(w[0]) for w in drift_model._w])))
+        elif M_min <= 4:
+            # Placeholders
+            M = t_patch_best.shape[0] - t_patch_sound.shape[0]
+            t_patch_wheel = np.ones(t_patch_sound.shape)*np.nan
+            idx_patch_wheel = np.ones(t_patch_sound.shape)*np.nan
 
-        if return_idx:
-            return t_patch_wheel, idx_patch_wheel, idx_in_patch, \
-                t_stop, idx_stop
+            # Find wheel-defined patch, if any, that best matches each
+            # sound-defined patch.
+            num_adjust = 0
+            t_patch_wheel = np.ones(t_patch_sound.shape)*np.nan
+            idx_patch_wheel = np.ones(t_patch_sound.shape)*np.nan
+            for i in range(t_patch_sound.shape[0]):
+                # Determine if wheel-defined patch meets requirements.
+                idx = self._compare_times(t_patch_sound[i:i+1,:], 
+                                          t_patch_best[:,:], 
+                                          atol)
+
+                # If so, assign entry and exit times per wheel.
+                if np.sum(idx) == 1:
+                    t_patch_wheel[i, :] = t_patch_best[idx, :]
+                    idx_patch_wheel[i, :] = idx_patch_best[idx, :]
+  
+                # If match fails, manually search for threshold crossings near
+                # patch-defined patch events.
+                elif (np.sum(idx) == 0):
+                    # Find first velocity threshold crossing after sound-defined
+                    # patch entry.
+                    t_start = t_patch_sound[i,0] - drift_model._w[1] # account for offset
+                    idx_enter = np.logical_and(t_wheel >= t_start,
+                                            v_smooth < v_stop)
+                    idx_enter = np.nonzero(idx_enter)[0]
+                    if len(idx_enter) > 0:
+                        idx_enter = idx_enter[0]
+                    else:
+                        idx_enter = 0
+                    t_enter = t_wheel[idx_enter]
+
+                    # Find first velocity threshold crossing after sound-defined
+                    # patch exit.
+                    idx_exit = np.logical_and(t_wheel > t_enter,
+                                            v_smooth > v_run)
+                    idx_exit = np.nonzero(idx_exit)[0]
+                    if len(idx_exit) > 0:
+                        idx_exit = idx_exit[0]
+                    else:
+                        idx_exit = len(t_wheel) - 1
+                    t_exit = t_wheel[idx_exit]
+
+                    if self._compare_times(t_patch_sound[i:i+1, :], 
+                                           np.array([[t_enter, t_exit]]),
+                                           atol):
+                        t_patch_wheel[i,:] = np.array([[t_enter, t_exit]])
+                        idx_patch_wheel[i,:] = np.array([[idx_enter, idx_exit]])
+                        num_adjust += 1
+
+                elif np.sum(idx) > 1:
+                    raise RuntimeError('Multiple wheel-defined patches match sound-defined patch.')
+
+            # Final check on patch time alignment.        
+            idx = ~np.isnan(t_patch_wheel[:, 0])
+            assert self._compare_times(t_patch_sound[idx, :],
+                                       t_patch_wheel[idx, :], 
+                                       atol).all()
+
+            # Set stop times as last patch entry if available. Otherwise, 
+            # extrapolate from last patch exit using drift model.
+            idx = np.nonzero(t_patch_best[:, 0] - self.vars['t_stop'] <= atol)[0]                
+            if np.sum(idx) > 0 and self.ALIGN_PATCH_ENTRY:
+                t_stop = t_patch_best[idx[0], 0]
+                idx_stop = int(idx_patch_best[idx[0], 0])
+            else:
+                t_stop = ((self.vars['t_stop'] - drift_model._w[1])
+                          /(1.0 + drift_model._w[0]))
+                idx_stop = np.nonzero(t_wheel >= min(t_stop, t_wheel[-1]))[0][0]
+                t_stop = t_wheel[idx_stop]
+
+            # Set drift model.
+            drift_model._w = w_best
+            self.drift_model = drift_model
+
+            # Print findings.
+            if self.verbose > 1:
+                msg = []
+                num_nan = np.sum(np.isnan(t_patch_wheel[:,0]))
+                if M + num_nan > 0:
+                    msg.append(f'removing {M + num_nan} wheel-defined patch(es)')
+                if num_nan > 0:
+                    msg.append(f'adding {num_nan} NaN placeholder(s)')
+                if num_adjust > 0:
+                    msg.append(f'adjusting {num_adjust} patch time(s) to match sound')
+                if len(msg) > 0:
+                    print('Alignment of wheel-defined patches required '
+                          + ' and '.join(msg) + '.')
         else:
-            return t_patch_wheel, idx_in_patch, t_stop
+            raise BadSession('Could not align wheel-defined patches.')
+
+        # Cache results for faster processing during next function call. Note
+        # these could be stored as variables (self.vars), but because they are
+        # "unfinished" by not being aligned to sound data, I'd rather cache them
+        # separately to avoid accidentally using these times in analysis.
+        key = (stop_thresh, search_rate, atol)
+        self._wheel_cache[key] = {'t_patch_wheel': t_patch_wheel,
+                                  'idx_patch_wheel': idx_patch_wheel,
+                                  't_stop': t_stop,
+                                  'idx_stop': idx_stop}
+
+        # Don't return idx_in_patch because it may no longer accurately reflect
+        # the corrected patch times after fixing shape mismatches. Also, note
+        # that idx_patch_wheel must be float in order to carry NaN values. In
+        # order to use it to index, it must be cast to int with the NaNs removed
+        # (otherwise, NaN is cast to a large negative integer).
+        if return_idx:
+            return t_patch_wheel, idx_patch_wheel, t_stop, idx_stop
+        else:
+            return t_patch_wheel, t_stop
+
+    def _compare_times(self, t_sound, t_wheel, atol):
+        # Determine which patch timestamps to match to sound.
+        start, stop = 1, 1
+        if self.ALIGN_PATCH_ENTRY:
+            start = 0
+        if self.ALIGN_PATCH_EXIT:
+            stop = 2
+        idx_event = slice(start, stop) 
+
+        # Criteria 1: Patch events aligned with tolerance.
+        crit1 = (np.abs(t_sound[:, idx_event] - t_wheel[:, idx_event]) <= atol)
+
+        if self.WHEEL_AFTER_SOUND_PATCH_ENTRY:
+            # Criteria 2: Wheel entry points.
+            crit2 = (t_wheel[:, 0] - t_sound[:, 0] >= -atol)
+            return np.logical_and(crit1.all(axis=1), crit2)
+        else:
+            return crit1.all(axis=1)
 
     def _estimate_clock_drift(self, 
-                              stop_thresh=0.5, 
-                              fs=200.0,
-                              tol=1.0,
+                              stop_thresh=0.5,
+                              tol=1.5,
                               event='exit'):
         # Requirements
-        req_data = ['wheel_position', 'wheel_time']
+        req_data = ['wheel_position', 'wheel_time', 'fs_wheel']
         req_vars = ['v_smooth', 't_patch']
         self._check_attributes(data_names=req_data, var_names=req_vars)
 
@@ -1237,6 +1646,7 @@ class LVSession(Session):
         v_smooth = self.vars['v_smooth']
         x_wheel = self.data['wheel_position']
         t_wheel = self.data['wheel_time']
+        fs = self.data['fs_wheel']
         t_patch_sound = self.vars['t_patch']
 
         # Session parameters
@@ -1249,22 +1659,33 @@ class LVSession(Session):
         x_start = 0.0 # linear position of current patch start
         t_patch_wheel = [0.0] # patch entry/exit timestamps according to wheel data
         offset = 0.0
-
+        
         # Iterate through wheel data, stopping after wheel and sound data conflict.
         for i in range(v_smooth.shape[0]):
             # Get corrected wheel position
-            x_i = x_wheel[i - int(offset*fs)]
+            x_i = x_wheel[max(i - int(offset*fs), 0)]
 
             # Leave patch criteria:
             # 1) in a patch
             # 2) smoothed velocity exceeds threshold
             if in_patch and v_smooth[i] > v_run:
                 in_patch = False
-                n_patch += 1
-                if n_patch == 1:
-                    offset = t_patch_sound[0, 1] - t_wheel[i]
-                t_patch_wheel.append(t_wheel[i])
-                x_start = x_i
+                if (abs(t_patch_sound[n_patch, 1] - t_wheel[i]) <= tol) or \
+                    (event == 'entry'):
+                    if (n_patch == 0):
+                        offset = t_patch_sound[0, 1] - t_wheel[i]
+                        x_i = x_wheel[max(i - int(offset*fs), 0)] # update correction
+                    n_patch += 1
+                    t_patch_wheel.append(t_wheel[i])
+                    x_start = x_i
+                elif n_patch == 0:
+                    t_patch_wheel = []
+                else:
+                    break
+            
+            # Break if number of patches from sound exceeded.
+            elif n_patch >= t_patch_sound.shape[0]:
+                break
 
             # Enter patch criteria:
             # 1) not in a patch
@@ -1274,17 +1695,19 @@ class LVSession(Session):
                 and v_smooth[i] < v_stop
                 and x_i - x_start > self.d_interpatch):
                 in_patch = True
-                if abs(t_patch_sound[n_patch, 0] - t_wheel[i]) <= tol:
+                if (abs(t_patch_sound[n_patch, 0] - t_wheel[i]) <= tol) or \
+                    (event == 'exit'):
                     t_patch_wheel.append(t_wheel[i])
                 else:
                     break
 
         # Calculate difference between patch times
+        if len(t_patch_wheel) % 2 == 1:
+            t_patch_wheel.pop()
         t_patch_wheel = np.array(t_patch_wheel).reshape([-1, 2])
-        diff = (t_patch_sound[:n_patch] - t_patch_wheel)[1:, :] # ignore first patch
+        diff = (t_patch_sound[:n_patch] - t_patch_wheel)
             
-        # Fit linear regresion model to patch entry/exit difference 
-        # to estimate clock drift.
+        # Determine which patch events to align.
         model = LinearRegression()
         if event.lower() == 'entry':
             j = 0
@@ -1292,7 +1715,23 @@ class LVSession(Session):
             j = 1
         else:
             raise SyntaxError('Unknown event \'{}\'.'.format(event))
-        model.fit(t_patch_sound[1:n_patch, j], diff[:, j])
+
+        # Fit linear regresion model to patch entry/exit difference 
+        # to estimate clock drift. If small number of patches, give best
+        # initial guess at slope rather than attempting to fit it, which 
+        # may lead to large overestimate of slope parameter.
+        if n_patch > 3:
+            model.fit(t_patch_wheel[1:, j], diff[1:, j]) # ignore first patch
+        else:
+            if n_patch > 0:
+                bias = diff[:n_patch, j].mean()
+            else:
+                bias = 0.6
+            slope = (0.050/3600.0) # typically ~50 ms per 60 min session
+            model._m = 1
+            model._w = np.array([[slope], [bias]])
+            if self.verbose > 2:
+                print('Not enough patches for initial drift model estimate.')
 
         return model
 
@@ -1313,7 +1752,7 @@ class LVSession(Session):
         t_patch_sound = self.vars['t_patch']
 
         # Get patch entry/exit timestamps from wheel
-        t_patch_wheel, idx_patch_wheel, _, t_stop, idx_stop = \
+        t_patch_wheel, idx_patch_wheel, t_stop_wheel, idx_stop_wheel = \
             self._get_patches_from_wheel(return_idx=True)
         t_wheel = self.data['wheel_time']
 
@@ -1323,11 +1762,7 @@ class LVSession(Session):
 
         # Load last analyzable timestamp for interpolation function
         # (corresponds to last patch entry)
-        t_stop = self.vars['t_stop']
-
-        # Estimate offset between encoder and DAQ start based on
-        # first patch exit (first analyzable timestamp)
-        offset = t_patch_sound[0, 1] - t_patch_wheel[0, 1]
+        t_stop_sound = self.vars['t_stop']
 
         # Interpolate between patch entry/exit timestamps to create
         # aligned wheel timestamps. Anchor wheel indices associated
@@ -1335,32 +1770,163 @@ class LVSession(Session):
         # corresponding timestamps based on sound. Handle special case
         # of session start (first patch "entry") due to initial offset
         # between DAQ and encoder.
-        x_interp = np.append(idx_patch_wheel.flatten(), idx_stop)
-        y_interp = np.append(np.insert(t_patch_sound.flatten()[1:], 0, offset), t_stop)
+        
+        # Create initial mapping between wheel time indices and associated
+        # timestamps according to sound.
+        start = 1
+        stop = 1
+        if self.ALIGN_PATCH_ENTRY:
+            start = 0
+        if self.ALIGN_PATCH_EXIT:
+            stop = 2
+        idx = slice(start, stop)
+        x_interp = idx_patch_wheel[:, idx].flatten()
+        y_interp = t_patch_sound[:, idx].flatten()
+
+        # Remove NaN data points.
+        idx = ~np.isnan(x_interp)
+        if np.sum(idx) > 0:
+            x_interp = x_interp[idx]
+            y_interp = y_interp[idx]
+        else:
+            self._failed_vars.append('t_wheel')
+            raise BadSession('Could not align wheel times with sound data.')
+
+        # Estimate offset between encoder and DAQ start based on
+        # first patch exit (first analyzable timestamp) unless
+        # only entry timestamps are aligned.
+        if self.ALIGN_PATCH_EXIT:
+            index = np.nonzero(~np.isnan(t_patch_wheel[:, 1]))[0][0]
+            offset = t_patch_sound[index, 1] - t_patch_wheel[index, 1]
+        elif self.ALIGN_PATCH_ENTRY:
+            # Avoid trivial case if first patch starts at 0.0
+            index = np.nonzero(~np.isnan(t_patch_wheel[:, 0]))[0].min()
+            if t_patch_sound[0, 0] == 0.0:
+                index = min(index, 1)
+            offset = t_patch_sound[index, 0] - t_patch_wheel[index, 0] 
+        else:
+            offset = 0.0
+
+        # If first anchor point is not at time zero (i.e. does not include
+        # first patch), then add it as offset.
+        if x_interp[0] != 0:
+            x_interp = np.insert(x_interp, 0, 0)
+            y_interp = np.insert(y_interp, 0, offset)
+        elif y_interp[0] == 0.0:
+            y_interp[0] = offset
+            
+        # Add last anchor point as last patch entry (t_stop). If patch entry is not
+        # aligned, then interpolate between last patch exit and t_stop, correcting
+        # for clock drift. 
+        # NOTE: The second step now occurs in _get_patches_from_wheel().
+        w_c = (1.0 + self.drift_model._w[0, 0]) # correction factor
+        x_interp = np.append(x_interp, idx_stop_wheel)
+        y_interp = np.append(y_interp, t_stop_wheel)
+        #if self.ALIGN_PATCH_ENTRY:
+        #    y_interp = np.append(y_interp, t_stop_sound)
+        #else:
+        #    dt = t_stop_wheel - t_patch_wheel[-1, -1]
+        #    y_interp = np.append(y_interp, y_interp[-1] + w_c*dt)
+
+        # Interpolate between first and last time-aligned events.
         f = interp1d(x_interp, y_interp)
         t_wheel_ = np.zeros(t_wheel.shape)
-        t_wheel_[:idx_stop+1] = f(np.arange(idx_stop+1))
+        t_wheel_[:idx_stop_wheel+1] = f(np.arange(idx_stop_wheel+1))
 
-        # Assign times after last patch entry (t_stop) based
-        # on original wheel timestamps
-        t_wheel_[idx_stop+1:] = t_wheel_[idx_stop] + (t_wheel[idx_stop+1:] - t_wheel_[idx_stop])
+        # Assign times after last patch entry (t_stop) based on original wheel timestamps
+        t_wheel_[idx_stop_wheel+1:] = (t_wheel_[idx_stop_wheel] + 
+                                       w_c*(t_wheel[idx_stop_wheel+1:] - t_wheel[idx_stop_wheel]))
 
         return t_wheel_
 
-    def _get_smoothed_velocity(self, dt=1.0, fs=200.0):
+    def get_smoothed_velocity(self, **kwargs):
         # Requirements
-        req_data = ['wheel_speed']
+        req_vars = ['v_smooth']
+        self._check_attributes(var_names=req_vars, **kwargs)
+
+        return self.vars['v_smooth']
+
+    def _get_smoothed_velocity(self, dt=1.0):
+        # Requirements
+        req_data = ['wheel_time', 'wheel_speed', 'fs_wheel']
         self._check_attributes(data_names=req_data)
 
-        # Create smoothed velocity trace
-        num_smooth = dt * fs # number of previous samples to include for smoothing
+        # Create smoothed velocity trace. Note that the LabVIEW code smooths
+        # over a fixed number of samples, not time, so even if the encoder
+        # sampling rate changes, the number of previous samples included remains
+        # constant.
+        num_smooth = dt * self.data['fs_wheel'] # number of previous samples to include for smoothing
         v_wheel = self.data['wheel_speed']
-        v_smooth = np.zeros(v_wheel.shape)
+        t_wheel = self.data['wheel_time'] # sometimes number of samples slightly differs
+        v_smooth = np.zeros(t_wheel.shape)
         for i in range(v_wheel.shape[0]):
             i_last = int(max(0, i - num_smooth + 1))
             v_smooth[i] = np.mean(v_wheel[i_last:i+1])
+
+        # Correct any dropped samples at end.
+        if v_smooth.shape[0] > v_wheel.shape[0]:
+            v_smooth[v_wheel.shape[0]:] = v_smooth[v_wheel.shape[0]-1]
         
         return v_smooth
+
+    def get_interpatch_durations_from_wheel(self, v0=None):
+        # Requirements
+        req_data = ['fs_wheel']
+        req_vars = ['t_patch_wheel', 't_stop_wheel', 't_wheel', 'v_smooth']
+        self._check_attributes(var_names=req_vars)
+
+        # Find interpatch times
+        t_switch = np.reshape(self.vars['t_patch_wheel'], [-1], order='C')
+        t_interpatch = np.append(t_switch[1:], self.vars['t_stop_wheel'])
+        t_interpatch = np.reshape(t_interpatch, [-1, 2])
+        dt_interpatch = np.diff(np.reshape(t_interpatch, [-1, 2]), axis=1)
+        dt_interpatch = np.atleast_1d(dt_interpatch.squeeze())
+        idx_nan = np.isnan(dt_interpatch) # ignore patches in which alignment failed
+
+        # Return endpoints if no velocity threshold.
+        if v0 is None:
+            return dt_interpatch
+
+        # Determine which samples of wheel data occur in each interpatch window.
+        t_wheel = self.vars['t_wheel']
+        v_smooth = self.vars['v_smooth']
+        idx = in_interval(t_wheel,
+                          t_interpatch[:, 0], 
+                          t_interpatch[:, 1],
+                          query='array')
+
+        # Get smoothed wheel velocity for each window.
+        v_interpatch = np.zeros(idx.shape)
+        idx = np.nonzero(idx)
+        v_interpatch[idx] = v_smooth[np.minimum(idx[1], len(v_smooth)-1)]
+
+        # Add time intervals in which v > v0.
+        dt_ip = np.ones([v_interpatch.shape[0]])*np.nan
+        for i in np.nonzero(~idx_nan)[0]:
+            # Get indices corresponding to velocity exceeding threshold.
+            idx, idx_stop = self._get_patch_times_from_signal(
+                (v_interpatch[i] >= v0).astype(np.int64), fs=1.0, drop_last=False)
+            idx = idx.astype(np.int64)
+            
+            # Correct edge case at end (set to len(t_wheel) 
+            # instead of len(t_wheel)-1).
+            idx[-1, -1] = min(idx[-1, -1], len(t_wheel)-1)
+
+            # Sum all intervals meeting velocity threshold criteria.
+            dt_ip[i] = np.sum(t_wheel[idx[:,1]] - t_wheel[idx[:,0]])
+
+        # Check against faster, less accurate method.
+        # EDIT: This is no longer useful because the encoder sampling rate may
+        # vary, leading to inaccurate results when using a constant sampling
+        # rate to determine elapsed time. Instead, check that interpatch times
+        # do not significantly get larger.
+        #dt_ip2 = np.sum(v_interpatch >= v0, axis=1)/self.data['fs_wheel']
+        #if (abs(dt_ip - dt_ip2) > 1.0).any():
+        #    warnings.warn('Discrepancy found between interpatch calculation methods.',
+        #                  category=UserWarning)
+        assert (dt_ip[~idx_nan] <= dt_interpatch[~idx_nan] + 3/self.data['fs_wheel']).all()
+
+        return dt_ip
 
     def save(self, filepath):
         """
@@ -1376,7 +1942,7 @@ class LVSession(Session):
         pickle.dump(d, f)
         f.close()
 
-    def load(self, filepath, load_keys=None, ignore_keys=[]):
+    def load(self, filepath, load_keys=None, ignore_keys=[], overwrite=True):
         """
         Loads serialized dictionary of class instance.
         """
@@ -1385,7 +1951,8 @@ class LVSession(Session):
         if load_keys is None:
             load_keys = d.keys()
         for k, v in d.items():
-            if k in load_keys and not k in ignore_keys:
+            if ((k in load_keys and not k in ignore_keys) and
+                (k not in self.__dict__.keys() or (k in self.__dict__.keys() and overwrite))):
                 self.__dict__[k] = v # avoids overwriting h5py.File
         f.close()
 
@@ -1617,3 +2184,148 @@ class TrialSession(Session):
                 self._ASCII_to_float(struct[s + 'VThresholdms'])
             self.settings['run_config']['end_patch_speed'] = \
                 self._ASCII_to_bool(struct[s + 'Endpatchspeed'])
+
+
+class PoissonSession(LVSession):
+
+    REWARD_VOLUME = 2.0 # uL
+
+    def __init__(self, *,
+                 filename=None,
+                 sess_filepath=None,
+                 pupil_filepath=None):
+        # Initialize Session
+        super().__init__(filename=filename,
+                         sess_filepath=sess_filepath,
+                         pupil_filepath=pupil_filepath)
+
+        # Because tone cloud only signifies covering interpatch distance,
+        # but not the start of the patch itself (when the animals stops),
+        # sound and wheel patch times will differ on patch entry.
+        self.ALIGN_PATCH_ENTRY = False
+        self.WHEEL_AFTER_SOUND_PATCH_ENTRY = True
+
+        # Set class instance attributes
+        self.data_names += ['reward']
+        if filename is not None:
+            struct = self.f['Settings']['Property']
+            s = 'SoundConfigurationRunConfig'
+            self.settings['run_config'] = {}
+            self.settings['run_config']['session_duration'] = \
+                self._ASCII_to_float(struct[s + 'SessionTimemin'])
+            self.settings['run_config']['noise_level_high'] = \
+                self._ASCII_to_float(struct[s + 'NoiseLevelHidBSPL'])
+            self.settings['run_config']['noise_level_low'] = \
+                self._ASCII_to_float(struct[s + 'NoiseLevelLodBSPL'])
+            self.settings['run_config']['target_level'] = \
+                self._ASCII_to_float(struct[s + 'TargetLevelHidBorDP'])
+            self.settings['run_config']['d_interpatch'] = \
+                self._ASCII_to_float(struct[s + 'InterPatchDistcm'])
+            self.settings['run_config']['d_patch'] = \
+                self._ASCII_to_float(struct[s + 'PatchLengthcm'])
+            self.settings['run_config']['task_type'] = \
+                self._ASCII_to_string(struct[s + 'TaskType'])
+            self.settings['run_config']['teleport'] = \
+                self._ASCII_to_bool(struct[s + 'InPatchTeleport'])
+            self.settings['run_config']['teleport_length'] = \
+                self._ASCII_to_float(struct[s + 'TeleToPatchEndcm'])
+            self.settings['run_config']['lambda0'] = \
+                self._ASCII_to_float(struct[s + 'Lambda'])
+            self.settings['run_config']['V0'] = \
+                self._ASCII_to_float(struct[s + 'DripSize'])
+            self.settings['run_config']['tau'] = \
+                self._ASCII_to_float(struct[s + 'DecayConstant'])
+            #self.settings['run_config']['r_low'] = \
+            #    self._ASCII_to_float(struct[s + 'ThresholduL'])
+            self.settings['run_config']['end_target_trial'] = \
+                self._ASCII_to_bool(struct[s + 'Endtargettrial'])
+            self.settings['run_config']['v_leave'] = \
+                self._ASCII_to_float(struct[s + 'VThresholdms']) * 100 # cm/s
+            self.settings['run_config']['end_patch_speed'] = \
+                self._ASCII_to_bool(struct[s + 'Endpatchspeed'])
+    
+        # Set default parameters for preprocessing sound waveform to estimate
+        # patch times.
+        self._sound_kwargs =  [{'med_filter_size': None,
+                                'butter_filter_fc': fc}
+                               for fc in [1.0, 0.5, 0.25, 0.1, 0.05]]
+        # Median filter computationally expensive but necessary in some cases,
+        # attempt if Butter filter fails.
+        self._sound_kwargs += [{'med_filter_size': t,
+                                'med_filter_unit': 'time',
+                                'butter_filter_fc': None}
+                                for t in [0.5, 1.0, 2.0, 4.0, 8.0]]
+        
+    def _load_subclass_data(self, name):
+        if name == 'reward':
+            self._check_attributes(var_names=['t_motor', 'n_motor_rem'])
+            n_motor = len(self.vars['t_motor']) + self.vars['n_motor_rem']
+            return self.REWARD_VOLUME*np.ones([n_motor])
+    
+    # Overwrite superclass method to account for sound attentuation
+    # of pink noise in between patches. Leave output as 's_var'.
+    def _preprocess_sound(self, wf, fs, **kwargs):
+        return smooth_waveform_power_ratio(wf, fs, **kwargs)
+
+    def _get_max_harvest_rate(self, per_patch=True, return_all=False):
+        # Requirements
+        required_vars = ['t_patch', 't_stop']
+        self._check_attributes(var_names=required_vars)
+
+        # Grab session settings
+        R_0 = 0.0
+        r_0 = self.settings['run_config']['lambda0']*self.settings['run_config']['V0']
+        tau = self.settings['run_config']['tau']
+
+        # Calculate cumulative reward
+        dt_patch = np.diff(self.vars['t_patch'], axis=1)
+        r_patch_max = cumulative_reward(dt_patch, R_0, r_0, tau)
+
+        if per_patch:
+            # Divide reward per patch by segment time (patch + next interpatch)
+            hr_patch_max = r_patch_max / self._get_segment_durations()
+            if return_all:
+                return hr_patch_max, r_patch_max, self._get_segment_durations()
+            else:
+                return hr_patch_max
+
+        else:
+            # Return total cumulative reward over time
+            hr_max = np.sum(r_patch_max) / self.vars['t_stop']
+            if return_all:
+                return hr_max, np.sum(r_patch_max), self.vars['t_stop']
+            else:
+                return hr_max
+
+    def _get_optimal_harvest_rate(self, per_patch=True, return_all=False):
+        # Requirements
+        required_data = ['wheel_speed']
+        self._check_attributes(data_names=required_data)
+
+        # Calculate minimum feasible travel time
+        v_thresh = 2.0 # cm/s 
+        d_interpatch = self.settings['run_config']['d_interpatch']
+        v_run = self.data['wheel_speed']
+        v_run = np.median(v_run[v_run > v_thresh])
+        t_t = d_interpatch / v_run
+
+        # Grab session settings
+        R_0 = 0.0
+        r_0 = self.settings['run_config']['lambda0']*self.settings['run_config']['V0']
+        tau = self.settings['run_config']['tau']
+
+        # Minimum travel time: R_0 / r_0
+        t_p_opt, r_opt = get_optimal_values(t_t=t_t, R_0=R_0, r_0=r_0, tau=tau)
+        
+        if return_all:
+            return r_opt / (t_p_opt + t_t), r_opt, t_p_opt, t_t
+        else:
+            return r_opt / (t_p_opt + t_t)
+    
+    @property
+    def d_interpatch(self):
+        return self.settings['run_config']['d_interpatch']
+    
+    @property
+    def d_patch(self):
+        return self.settings['run_config']['d_patch']
