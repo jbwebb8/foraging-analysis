@@ -764,7 +764,10 @@ class Plotter:
                              x_spacing=None,
                              plot_subjects=True,
                              bw_method=None,
+                             relative=False,
                              density_scale=1.0,
+                             transform='linear',
+                             percentile_bounds=[0.0, 100.0],
                              **kwargs):
         return self._scatter_by_condition(data, 
                                           cond, 
@@ -778,7 +781,10 @@ class Plotter:
                                           x_spacing=x_spacing,
                                           plot_subjects=plot_subjects,
                                           bw_method=bw_method,
+                                          relative=relative,
                                           density_scale=density_scale,
+                                          transform=transform,
+                                          percentile_bounds=percentile_bounds,
                                           **kwargs)
 
     def _scatter_by_condition(self,
@@ -801,11 +807,24 @@ class Plotter:
                               xlim=None,
                               ylim=None,
                               bw_method=None,
+                              relative=False,
                               density_scale=1.0,
+                              transform='linear',
                               reflect_x=False,
+                              percentile_bounds=[0.0, 100.0],
                               **kwargs):
         # Define main function with arguments above.
         def _plot_data(y, c_y, center, xlim, ylim):
+            # Confine data to percentile lower and upper bounds.
+            sort_idx = np.argsort(y)
+            y = y[sort_idx]; c_y = c_y[sort_idx]
+            idx = []
+            assert len(percentile_bounds) == 2
+            for bound in percentile_bounds:
+                idx.append(np.abs(np.percentile(y, bound) - y).argmin())
+            y = y[idx[0]:idx[1]+1]; c_y = c_y[idx[0]:idx[1]+1]
+
+            # Plot by plot type.
             if plot_type.lower() == 'swarm':
                 if max_pts is not None:
                     idx = np.random.permutation(np.arange(len(y)))[:max_pts]
@@ -827,9 +846,29 @@ class Plotter:
                                 positions=np.array([center]), 
                                 **kwargs)
             elif plot_type.lower() == 'density':
-                density = stats.gaussian_kde(y, bw_method=bw_method)
-                pts = np.linspace(y.min(), y.max(), num=1000)
-                x = center + ((-1)**reflect_x)*density_scale*density(pts)
+                # Get density from KDE.
+                if transform.lower() == 'log':
+                    # See https://www.stata-journal.com/sjpdf.html?articlenum=gr0003,
+                    # pp. 76-78
+                    if not (y > 0.0).all():
+                        raise ValueError('Logarithmic transformation can only be'
+                                         + ' applied to strictly positive datasets.')
+                    pts = np.geomspace(y.min(), y.max(), num=1000)
+                    dfdy = 1.0/pts
+                    density = stats.gaussian_kde(np.log(y), bw_method=bw_method)
+                    x = density(np.log(pts))*dfdy
+                elif transform.lower() == 'linear':
+                    pts = np.linspace(y.min(), y.max(), num=1000)
+                    density = stats.gaussian_kde(y, bw_method=bw_method)
+                    x = density(pts)
+                
+                # Center over categorical positions and modify as specified:
+                # - Reflect x to negative direction.
+                # - Normalize such that max height is one.
+                # - Scale density value for aesthetic purposes.
+                x = center + ((-1)**reflect_x)*(x.max()**(-relative))*density_scale*x
+                
+                # Plot based on specified coloration.
                 if not np.isclose(c_y[0], c_y).all():
                     warnings.warn('Only one color value can be applied to density '
                                   'plot. Using first value as default.',
@@ -999,10 +1038,11 @@ class Plotter:
         self.ax.set_xticks(xticks_all)
         self.ax.set_xticklabels(xlabels_all, rotation=45, ha='right')
 
-    def apply_swarm_spacing(self, x, y, 
+    def apply_swarm_spacing(self, x, y,
                             s=1.0, 
                             r_factor=1.0, 
                             order='ascending',
+                            fixed_idx=None,
                             xlim=None,
                             ylim=None):
         # Get axis limits based on dummy scatter plot if not provided
@@ -1028,6 +1068,11 @@ class Plotter:
             sort_idx = sort_idx[::-1]
         elif order.lower() != 'ascending':
             raise ValueError('Unknown order \'{}\'.'.format(order))
+        if fixed_idx is not None:
+            # Move fixed points to beginning to fix positions. Reversing to
+            # original order at end still works.
+            sort_idx = np.hstack([fixed_idx, sort_idx[~np.isin(sort_idx, fixed_idx)]])
+        
         x = x[sort_idx]
         y = y[sort_idx]
 
@@ -1074,7 +1119,9 @@ class Plotter:
         xy_data = self.ax.transData.inverted().transform(np.vstack([x, y]).T)
         x_data, y_data = xy_data.T
 
-        return x_data, y_data
+        # Return data in original order
+        inv_idx = np.argsort(sort_idx)
+        return x_data[inv_idx], y_data[inv_idx]
 
         
 
