@@ -7,6 +7,7 @@ from tempfile import TemporaryFile
 import json, yaml
 import gc
 import warnings
+import http.client
 
 # Google Drive API
 try:
@@ -14,6 +15,7 @@ try:
     import os.path
     from googleapiclient.discovery import build
     from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
     from googleapiclient.errors import HttpError
 except ModuleNotFoundError as e:
@@ -147,9 +149,10 @@ class GoogleDriveService:
         # The file token.pickle stores the user's access and refresh tokens, and is
         # created automatically when the authorization flow completes for the first
         # time.
-        if os.path.exists('token.pickle'):
-            with open('token.pickle', 'rb') as token:
-                creds = pickle.load(token)
+        if os.path.exists('token.json'):
+            #with open('token.json', 'rb') as token:
+            #    creds = pickle.load(token)
+            creds = Credentials.from_authorized_user_file('token.json')
                 
         # If there are no (valid) credentials available, let the user log in.
         if not creds or not creds.valid:
@@ -168,8 +171,9 @@ class GoogleDriveService:
                 creds = flow.run_local_server()
             
             # Save the credentials for the next run
-            with open('token.pickle', 'wb') as token:
-                pickle.dump(creds, token)
+            with open('token.json', 'w') as token:
+                token.write(creds.to_json())
+
 
         # Build service
         self._service = build('drive', 'v3', credentials=creds)
@@ -180,6 +184,7 @@ class GoogleDriveService:
                  byte_range=None,
                  chunk_size=100*1024*1024, # from Google API
                  file_object=None,
+                 max_attempts=10,
                  verbose=True):
         # Get download url
         if file_id is None:
@@ -208,10 +213,29 @@ class GoogleDriveService:
         else:
             pointer = byte_range[0]
             while pointer < byte_range[1]:
-                # Get next chunk and write to file object
+                # Get next chunk
                 end = min(pointer + chunk_size - 1, size - 1)
                 header = {'Range': 'bytes=%d-%d' % (pointer, end)}
-                resp, content = self._service._http.request(download_url, headers=header)
+                success = False
+                i = 0
+                while (i < max_attempts) and (not success):
+                    try:
+                        # Attempt to download next chunk.
+                        resp, content = self._service._http.request(download_url, headers=header)
+                        success = True
+                    except http.client.IncompleteRead as e:
+                        # Handle IncompleteRead and re-attempt if limit not exceeded.
+                        # Note: Probably better to just retry, as here, instead of 
+                        # writing partial download to file, which can be unreliable.
+                        i += 1
+                        if verbose and (i < max_attempts):
+                            print(f'Incomplete read. Retrying... ({i} of {max_attempts})')
+                
+                # Download to file object if no errors.
+                if i == max_attempts: # incomplete reads
+                    raise HTTPError(None, 'Download failed due to incomplete read.')
+                elif not success: # failed for another reason
+                    raise HTTPError(None, 'Download failed.')
                 file_object.write(content)
 
                 # Print progress update
@@ -423,7 +447,7 @@ class GoogleDriveService:
             
             # Only search for ID if not provided.
             if 'id' not in parent.keys():
-                parents = self.get_folder_ids(foldername=parent, exact_match=True)['files']
+                parents = self.get_folder_ids(foldername=parent['name'], exact_match=True)
             elif not isinstance(parent['id'], list):
                 parents = [parent['id']]
             else:
