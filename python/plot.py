@@ -79,7 +79,7 @@ class Plotter:
         for ax_ in axes_:
             ax_.set_xscale(scale)
 
-    def format_axis(self, style='simple', all_axes=True):
+    def format_axis(self, style='simple', all_axes=True, **kwargs):
         # Get axes to format.
         if all_axes:
             axes_ = self.axes[self.show].flatten()
@@ -91,33 +91,47 @@ class Plotter:
 
         # Format axes in specified style.
         for ax_ in axes_:
-            self._format_axis(ax_, style=style)
+            self._format_axis(ax_, style=style, **kwargs)
     
-    def _format_axis(self, ax, style):
+    def _format_axis(self, ax, style, twinx=None):
         if style.lower() == 'simple':
             # Basic style with x- and y-axis spines visible between tick marks.
             ax.spines['top'].set_visible(False)
-            ax.spines['right'].set_visible(False)
-            xticks, xlim = ax.get_xticks(), ax.get_xlim()
-            ax.spines['bottom'].set_bounds(xticks[xticks >= xlim[0]][0],
-                                           xticks[xticks <= xlim[-1]][-1])
-            yticks, ylim = ax.get_yticks(), ax.get_ylim()
-            ax.spines['left'].set_bounds(yticks[yticks >= ylim[0]][0],
-                                         yticks[yticks <= ylim[-1]][-1])
-
-            # Remove minor ticks outside of bounds.
-            xminticks = np.array(ax.get_xticks(minor=True))
-            if len(xminticks) > 0:
-                ax.set_xticks(xminticks[np.logical_and(xminticks >= xticks[xticks >= xlim[0]][0],
-                                                       xminticks <= xticks[xticks <= xlim[-1]][-1])],
-                              minor=True)
-            yminticks = np.array(ax.get_yticks(minor=True))
-            if len(yminticks) > 0:
-                ax.set_yticks(yminticks[np.logical_and(yminticks >= yticks[yticks >= ylim[0]][0],
-                                                       yminticks <= yticks[yticks <= ylim[-1]][-1])],
-                              minor=True)
+            self._format_simple_x_axis(ax, spine='bottom')
+            self._format_simple_y_axis(ax, spine='left')
+            if twinx is None:
+                ax.spines['right'].set_visible(False)
+            else:
+                self._format_simple_y_axis(twinx, spine='right')
+            
         else:
             raise ValueError(f'Unknown style \'{style}\'.')
+
+    def _format_simple_x_axis(self, ax, spine='bottom'):
+        # x-axis traverses two tick marks at min and max.
+        xticks, xlim = ax.get_xticks(), ax.get_xlim()
+        ax.spines[spine].set_bounds(xticks[xticks >= xlim[0]][0],
+                                    xticks[xticks <= xlim[-1]][-1])
+
+        # Remove minor ticks outside of bounds.
+        xminticks = np.array(ax.get_xticks(minor=True))
+        if len(xminticks) > 0:
+            ax.set_xticks(xminticks[np.logical_and(xminticks >= xticks[xticks >= xlim[0]][0],
+                                                   xminticks <= xticks[xticks <= xlim[-1]][-1])],
+                          minor=True)
+    
+    def _format_simple_y_axis(self, ax, spine='left'):
+        # y-axis traverses two tick marks at min and max.
+        yticks, ylim = ax.get_yticks(), ax.get_ylim()
+        ax.spines[spine].set_bounds(yticks[yticks >= ylim[0]][0],
+                                    yticks[yticks <= ylim[-1]][-1])
+        
+        # Remove minor ticks outside of bounds.   
+        yminticks = np.array(ax.get_yticks(minor=True))
+        if len(yminticks) > 0:
+            ax.set_yticks(yminticks[np.logical_and(yminticks >= yticks[yticks >= ylim[0]][0],
+                                                   yminticks <= yticks[yticks <= ylim[-1]][-1])],
+                          minor=True)
 
     def plot_learning_curve(self,
                             days,
