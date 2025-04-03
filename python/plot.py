@@ -52,7 +52,7 @@ class Plotter:
             ax.spines['right'].set_visible(False)
 
         # Axes to show
-        self.show = np.ones(self.axes.shape, dtype=np.bool)
+        self.show = np.ones(self.axes.shape, dtype=bool)
 
     def set_current_axis(self, idx):
         # Numpy arrays support variable number of indices if
@@ -162,7 +162,7 @@ class Plotter:
                 day_range_ = day_range        
 
             if day_range_ is None:
-                return np.ones(len(d), dtype=np.bool)            
+                return np.ones(len(d), dtype=bool)            
             elif len(day_range_) == 2: # assume [min, max]
                 return np.logical_and(d >= day_range_[0], d <= day_range_[1])
             elif isinstance(day_range_, (list, np.ndarray)): # assume array of possible values
@@ -319,7 +319,7 @@ class Plotter:
                                                 method=center,
                                                 return_all=False)
             if day_range is None:
-                plot_idx = np.ones(len(days_), dtype=np.bool)
+                plot_idx = np.ones(len(days_), dtype=bool)
             else:
                 plot_idx = np.logical_and(days_ >= day_range[0], days_ <= day_range[1])
             self.ax.plot(days_[plot_idx], t_p_opt_[plot_idx], 
@@ -402,7 +402,7 @@ class Plotter:
                               np.asarray([t_start]), 
                               np.asarray([t_stop]),
                               query='event')
-            t_lick_ = t_lick[idx.astype(np.bool)] % dt_chunk
+            t_lick_ = t_lick[idx.astype(bool)] % dt_chunk
             h_lick = self.ax.vlines(t_lick_, i-0.3, i+0.3, color=c_lick)
             
             # Plot motor times within chunk
@@ -410,7 +410,7 @@ class Plotter:
                               np.asarray([t_start]), 
                               np.asarray([t_stop]),
                               query='event')
-            t_motor_ = t_motor[idx.astype(np.bool)] % dt_chunk
+            t_motor_ = t_motor[idx.astype(bool)] % dt_chunk
             h_motor = self.ax.vlines(t_motor_, i-0.3, i+0.3, color=c_motor)
 
         # Plot settings
@@ -765,6 +765,35 @@ class Plotter:
                                           x_spacing=x_spacing,
                                           plot_subjects=plot_subjects,
                                           **kwargs)
+    
+    def hist_by_condition(self,
+                          data, 
+                          cond, 
+                          cond_params,
+                          include_cond=None,
+                          c=0.5,
+                          figsize=(15, 15),
+                          new_fig=True,
+                          x_offset=0.0,
+                          x_spacing=None,
+                          plot_subjects=True,
+                          relative=False,
+                          density_scale=1.0,
+                          **kwargs):
+        return self._scatter_by_condition(data, 
+                                          cond, 
+                                          cond_params,
+                                          plot_type='histogram',
+                                          include_cond=include_cond,
+                                          c=c,
+                                          figsize=figsize,
+                                          new_fig=new_fig,
+                                          x_offset=x_offset,
+                                          x_spacing=x_spacing,
+                                          plot_subjects=plot_subjects,
+                                          relative=relative,
+                                          density_scale=density_scale,
+                                          **kwargs)
 
     def density_by_condition(self,
                              data, 
@@ -778,10 +807,13 @@ class Plotter:
                              x_spacing=None,
                              plot_subjects=True,
                              bw_method=None,
+                             bd_method='basic',
                              relative=False,
+                             center_metric=None,
                              density_scale=1.0,
                              transform='linear',
                              percentile_bounds=[0.0, 100.0],
+                             density_bounds=None,
                              **kwargs):
         return self._scatter_by_condition(data, 
                                           cond, 
@@ -795,10 +827,13 @@ class Plotter:
                                           x_spacing=x_spacing,
                                           plot_subjects=plot_subjects,
                                           bw_method=bw_method,
+                                          bd_method=bd_method,
                                           relative=relative,
+                                          center_metric=center_metric,
                                           density_scale=density_scale,
                                           transform=transform,
                                           percentile_bounds=percentile_bounds,
+                                          density_bounds=density_bounds,
                                           **kwargs)
 
     def _scatter_by_condition(self,
@@ -821,11 +856,14 @@ class Plotter:
                               xlim=None,
                               ylim=None,
                               bw_method=None,
+                              bd_method='basic',
                               relative=False,
+                              center_metric=None,
                               density_scale=1.0,
                               transform='linear',
                               reflect_x=False,
                               percentile_bounds=[0.0, 100.0],
+                              density_bounds=None,
                               **kwargs):
         # Define main function with arguments above.
         def _plot_data(y, c_y, center, xlim, ylim):
@@ -834,9 +872,21 @@ class Plotter:
             y = y[sort_idx]; c_y = c_y[sort_idx]
             idx = []
             assert len(percentile_bounds) == 2
-            for bound in percentile_bounds:
-                idx.append(np.abs(np.percentile(y, bound) - y).argmin())
+            for i, bound in enumerate(percentile_bounds):
+                # Apply boundary at index closest to percentile value. Use 
+                # left-sided approach for lower bound and right-sided for
+                # upper bound if equal values.
+                diff = np.abs(np.percentile(y, bound) - y)
+                idx.append(np.argwhere(np.isclose(diff, diff.min())).squeeze(axis=1)[-i])
             y = y[idx[0]:idx[1]+1]; c_y = c_y[idx[0]:idx[1]+1]
+
+            # Specify single color for non-swarm plots.
+            if plot_type.lower() != 'swarm':
+                if not np.isclose(c_y[0], c_y).all():
+                    warnings.warn(f'Only one color value can be applied to {plot_type} '
+                                   'plots. Using first value as default.',
+                                  category=SyntaxWarning)
+                c_y = c_y[0]
 
             # Plot by plot type.
             if plot_type.lower() == 'swarm':
@@ -859,41 +909,83 @@ class Plotter:
                 self.ax.boxplot(y,
                                 positions=np.array([center]), 
                                 **kwargs)
+            elif plot_type.lower() == 'histogram':
+                # Plot histogram.
+                (N, _, container) = self.ax.hist(y,
+                                                 color=self.cmap(c_y),
+                                                 bottom=center,
+                                                 histtype='bar',
+                                                 orientation='horizontal',
+                                                 **kwargs)
+                
+                # Modify as specified:
+                # - Reflect x to negative direction.
+                # - Normalize such that max height is one.
+                # - Scale density value for aesthetic purposes.
+                max_width = max([patch._width for patch in container.patches])
+                for patch in container.patches:
+                    patch._width *= ((-1)**reflect_x)*(max_width**(-relative))*density_scale
+                
+                # Update axes limits. See https://stackoverflow.com/a/11039268.
+                self.ax.relim()
+                self.ax.autoscale_view()
+                
             elif plot_type.lower() == 'density':
+                # Determine extents of density plot.
+                if density_bounds is None:
+                    extents = [y.min(), y.max()]
+                elif not isinstance(density_bounds, (list, tuple, np.ndarray)):
+                    raise SyntaxError('density_bounds must be array-like object.')
+                elif len(density_bounds) != 2:
+                    raise SyntaxError('density_bounds must be of form [min, max].')
+                else:
+                    # Must reassign to local variable because cannot alter 
+                    # global variable outside of local scope.
+                    extents = density_bounds
+                
                 # Get density from KDE.
+                kde = ephys.KDE(kernel_type='Gaussian', bounds=density_bounds)
                 if transform.lower() == 'log':
                     # See https://www.stata-journal.com/sjpdf.html?articlenum=gr0003,
                     # pp. 76-78
                     if not (y > 0.0).all():
                         raise ValueError('Logarithmic transformation can only be'
                                          + ' applied to strictly positive datasets.')
-                    pts = np.geomspace(y.min(), y.max(), num=1000)
+                    pts = np.geomspace(*extents, num=1000)
                     dfdy = 1.0/pts
-                    density = stats.gaussian_kde(np.log(y), bw_method=bw_method)
-                    x = density(np.log(pts))*dfdy
+                    #density = stats.gaussian_kde(np.log(y), bw_method=bw_method)
+                    #x = density(np.log(pts))*dfdy
+                    kde.fit(np.log(y), bw_method=bw_method, bd_method=bd_method)
+                    x = kde.pdf(np.log(pts))*dfdy
                 elif transform.lower() == 'linear':
-                    pts = np.linspace(y.min(), y.max(), num=1000)
-                    density = stats.gaussian_kde(y, bw_method=bw_method)
-                    x = density(pts)
+                    pts = np.linspace(*extents, num=1000)
+                    #density = stats.gaussian_kde(y, bw_method=bw_method)
+                    #x = density(pts)
+                    kde.fit(y, bw_method=bw_method, bd_method=bd_method)
+                    x = kde.pdf(pts)
                 
                 # Center over categorical positions and modify as specified:
                 # - Reflect x to negative direction.
                 # - Normalize such that max height is one.
                 # - Scale density value for aesthetic purposes.
-                x = center + ((-1)**reflect_x)*(x.max()**(-relative))*density_scale*x
+                f = lambda x: center + ((-1)**reflect_x)*(x.max()**(-relative))*density_scale*x
+                x = f(x)
                 
                 # Plot based on specified coloration.
-                if not np.isclose(c_y[0], c_y).all():
-                    warnings.warn('Only one color value can be applied to density '
-                                  'plot. Using first value as default.',
-                                  category=SyntaxWarning)
-                c_y = c_y[0]
                 self.ax.plot(x, pts,
                              color=self.cmap(c_y),
                              **kwargs)
                 self.ax.fill_betweenx(pts, x1=x, x2=center,
                                       color=self.cmap(c_y),
                                       alpha=0.3)
+                if center_metric is not None:
+                    self._plot_center(y,
+                                      lambda y: f(kde.pdf(y)),
+                                      center=center_metric, 
+                                      orientation='vertical', 
+                                      x_min=center,
+                                      c=c_y)
+                
             else:
                 raise ValueError('Unknown scatter type \'{}\'.'.format(plot_type))
 
@@ -1278,6 +1370,7 @@ class Plotter:
                           pdf_scale=1.0,
                           hist_kwargs={},
                           dist_kwargs={},
+                          fit_kwargs={},
                           ignore_nan=False):
         # Check input data. Should be 1D vector.
         if isinstance(x, list):
@@ -1309,7 +1402,7 @@ class Plotter:
                      **hist_kwargs)
     
         # Plot fitted distribution.
-        model.fit(x)
+        model.fit(x, **fit_kwargs)
         if spacing == 'linear':
             t = np.linspace(x.min(), x.max(), num=1000)
         elif spacing == 'geometric':
@@ -1325,7 +1418,21 @@ class Plotter:
                              alpha=0.3)
         
         # Plot center metric if specified.
+        f = lambda x: pdf_scale*model.pdf(np.array([x]))
+        self._plot_center(x, f, center, c=c, **dist_kwargs)
+
+    def _plot_center(self, x, f,
+                     center='mean', 
+                     percentile=None, 
+                     orientation='horizontal',
+                     y_min=0.0,
+                     x_min=0.0,
+                     c=0.0,
+                     **kwargs):
+        # Obtain point of interest, x_center, based on observed data, x.
+        # Then find corresponding value of function, f(x_center).
         if center is not None:
+            # Find center of distribution by specified method.
             if center == 'mean':
                 x_center = x.mean()
             elif center == 'median':
@@ -1334,20 +1441,27 @@ class Plotter:
                 x_center = np.exp(np.mean(np.log(x)))
             else:
                 raise ValueError('Unknown center \'{}\'.'.format(center))
-            self.ax.vlines(x_center, 
-                           ymin=0.0, 
-                           ymax=pdf_scale*model.pdf(np.array([x_center])),
-                           color=self.cmap(c),
-                           **dist_kwargs)
         elif percentile is not None:
+            # Find specified percentile.
             if percentile < 0.0 or percentile > 100.0:
                 raise ValueError('percentile must be between 0 and 100.')
-            x_p = np.percentile(x, percentile, interpolation='linear')
-            self.ax.vlines(x_p, 
-                           ymin=0.0, 
-                           ymax=pdf_scale*model.pdf(np.array([x_p])),
+            x_center = np.percentile(x, percentile, interpolation='linear')
+
+        # Plot line based on orientation.
+        if orientation.lower() == 'horizontal':
+            self.ax.vlines(x_center, 
+                           ymin=y_min, 
+                           ymax=y_min+f(x_center),
                            color=self.cmap(c),
-                           **dist_kwargs)
+                           **kwargs)
+        elif orientation.lower() == 'vertical':
+            self.ax.hlines(x_center,
+                           xmin=x_min,
+                           xmax=x_min+f(x_center),
+                           color=self.cmap(c),
+                           **kwargs)
+        else:
+            raise ValueError(f'orientation \'{orientation}\' not understood.')
 
     def save_figure(self, filepath, ext='pdf', dpi=None):
         plt.savefig(filepath, format=ext, dpi=dpi)

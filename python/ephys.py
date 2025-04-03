@@ -2301,6 +2301,194 @@ class LogGaussian(Gaussian):
         # Return pdf, noting that the scaling factor is prod_i(1/x_i).
         return num / (np.prod(np.exp(X), axis=1)*self._den)
 
+class KDE(Distribution):
+    warnings.simplefilter('once', category=UserWarning) # TODO: place lineno
+    
+    def __init__(self, kernel_type='Gaussian', bounds=[-np.inf, np.inf]):
+        super().__init__()
+        self._name = 'kde'
+        self._method = None
+        self._kernel_type = kernel_type
+        self._kernel = None # kernel model
+        self._h = None # kernel bandwidth
+        self._h_scale = 1.0 # rescaling constant for bandwidth
+        self._pdf_scale = lambda x: 1.0 # rescaling constant for pdf (renormalization)
+        self._bounds = bounds # boundary conditions
+        self._transform = lambda x: x
+        
+    def _params(self):
+        # KDE is by definition a non-parametric model.
+        return {'kernel_type': self._kernel_type}
+
+    def _format_data(self, x):
+        x = np.array(np.squeeze(x), ndmin=1)
+        if x.ndim == 1:
+            return x
+        else:
+            raise NotImplementedError('Multidimensional KDE model not yet implemented.')
+    
+    def _fit(self, x,
+             bd_method='basic',
+             **kwargs):
+        x = self._format_data(x)
+        self._method = bd_method.lower()
+        if bd_method.lower() == 'basic':
+            return self._fit_basic(x, **kwargs)
+        elif bd_method.lower() == 'reflection':
+            return self._fit_reflect(x, **kwargs)
+        elif bd_method.lower() == 'truncate':
+            return self._fit_truncate(x, **kwargs)
+        elif bd_method.lower() == 'weighted':
+            return self._fit_weighted(x, **kwargs)
+        elif bd_method.lower() == 'transform':
+            return self._fit_transform(x, **kwargs)
+        else:
+            raise ValueError(f'Unknown boundary method \'{bd_method}\'.')
+        
+    def _set_bandwidth(self, x, bw_method='scott'):
+        # Set bandwidth according to specified rule of thumb.
+        if self._h is not None:
+            return
+        elif bw_method == 'scott':
+            self._h = (x.shape[0]**(-0.2))*np.std(x) # Scott's rule
+        else:
+            raise ValueError(f'Unknown bandwidth method \'{bw_method}\'.')
+
+        # Rescale bandwidth per fit methodology.
+        self._h *= self._h_scale
+
+    def _set_kernel(self, x, kernel_type):
+        # Follow convention of shape [N, m] --> [len(preds), len(data)].
+        if kernel_type == 'Gaussian':
+            self._kernel = stats.norm(loc=x.reshape([1, -1]), scale=self._h)
+        else:
+            raise ValueError(f'Unknown kernel type \'{kernel_type}\'.')
+
+    def _fit_basic(self, x,
+                   bw_method='scott',
+                   kernel_type='Gaussian'):
+        # Create model kernel.
+        self._set_bandwidth(x, bw_method)
+        self._set_kernel(x, kernel_type)
+
+        return self._kernel
+
+    def  _fit_reflect(self, x, **kwargs):
+        # Reflect data across specified boundaries.
+        n = sum([not np.isinf(b) for b in self._bounds]) # number of boundary conditions
+        x_orig = np.copy(x)
+        x = [x]
+        for i, bound in zip([0, 2], self._bounds):
+            if not np.isinf(bound):
+                x.insert(i, bound - (x_orig - bound))
+        x = np.hstack(x)
+
+        # Fit KDE to reflected data.
+        self._h_scale = 1.0/(n+1)
+        self._pdf_scale = lambda y: n+1
+        self._fit_basic(x, **kwargs)
+
+        return self._kernel
+
+    def _fit_truncate(self, x, **kwargs):
+        # Fit KDE to data.
+        self._fit_basic(x, **kwargs)
+
+        # Calculate net cumulative distribution with boundaries (a, b) as:
+        # P(x in [a,b]) = cdf(b) - cdf(a)
+        Pab = (stats.norm.cdf(self._bounds[1], loc=x, scale=self._h) -
+               stats.norm.cdf(self._bounds[0], loc=x, scale=self._h))
+        self._pdf_scale = lambda y: (1.0/Pab)[np.newaxis, :] # broadcast across predictions
+
+        return self._kernel
+
+    def _fit_weighted(self, x, **kwargs):
+         # Fit KDE to data.
+        self._fit_basic(x, **kwargs)
+
+        # Calculate net cumulative distribution with boundaries (a, b) as:
+        # P(x in [a,b]) = cdf(b) - cdf(a)
+        def _rescale(y):
+            Pab = (stats.norm.cdf(self._bounds[1], loc=y, scale=self._h) -
+                   stats.norm.cdf(self._bounds[0], loc=y, scale=self._h))
+            return (1.0/Pab)[:, np.newaxis] # broadcast across observations
+        self._pdf_scale = _rescale
+
+        return self._kernel
+
+    def _fit_transform(self, x, epsilon=1e-5, **kwargs):
+        # Get boundaries in simpler form.
+        a, b = self._bounds
+
+        # Pad boundaries if needed to avoid overflow during transformation.
+        is_close = np.isclose(x[:, np.newaxis], np.array([[a, b]]))
+        if is_close[:,0].any():
+            a -= epsilon
+        if is_close[:,1].any():
+            b += epsilon
+       
+        # Create transformation functions.
+        if not np.isinf([a, b]).any():
+            # Transform data to logit space.
+            u = lambda x: (x - a)/(b - a) # map to [0, 1]
+            t = lambda x: np.log(u(x)/(1.0 - u(x)))
+            dtdx = lambda x: (1.0/(u(x)*(1.0 - u(x)))) * (1.0/(b - a))
+
+        elif not np.isinf(a):
+            # Transform lower-bounded data into logarithmic space.
+            u = lambda x: x - a # map to [0, inf]
+            t = lambda x: np.log(u(x))
+            dtdx = lambda x: 1.0/u(x)
+        elif not np.isinf(b):
+            # Transform upper-bounded into (reflected) logarithmic space.
+            u = lambda x: -(x - b) # map to [0, inf]
+            t = lambda x: np.log(u(x))
+            dtdx = lambda x: -1.0/u(x)
+        else:
+            raise ValueError('Transformation not applicable to unbounded data.')
+    
+        # Fit KDE to data in transformed space.
+        self._transform = t
+        self._fit_basic(t(x), **kwargs)
+        self._pdf_scale = lambda x: dtdx(x)[:, np.newaxis] # broadcast across observations
+
+        return self._kernel
+        
+    def _pdf(self, x):
+        # Format data appropriately.
+        x = self._format_data(x)
+        
+        # Obtain pdf from transformed data for predicted values, if needed.
+        # Then apply pdf_scale first in case need to broadcast across
+        # individual kernels.
+        pdf = self._pdf_scale(x)*self._kernel.pdf(self._transform(x).reshape([-1, 1]))
+        pdf = pdf.mean(axis=1)
+        
+        # Set values outside boudaries to zero.
+        idx = np.logical_or(x < self._bounds[0], x > self._bounds[1])
+        pdf[idx] = 0.0
+
+        return pdf
+    
+    def _cdf(self, x):
+        raise NotImplementedError
+    
+    def _inv_cdf(self, F):
+        raise NotImplementedError
+    
+    def goodness_of_fit(self, x):
+        raise NotImplementedError
+        # # Sort random values
+        # x = np.sort(x)
+        
+        # # Calculate ecdf
+        # ecdf = np.arange(len(x))/float(len(x))
+
+        # # Get KS statistic
+        # #return np.max(np.abs(self.cdf(x) - ecdf))
+        # result = stats.kstest(rvs=x, cdf=self.cdf)
+        
+        # return self._TestResult(result[0], result[1])
 
 ### Classification models ###
 class Model:
