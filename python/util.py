@@ -6,6 +6,8 @@ import time
 from tempfile import TemporaryFile
 import json, yaml
 import gc
+import warnings
+import http.client
 
 # Google Drive API
 try:
@@ -13,6 +15,7 @@ try:
     import os.path
     from googleapiclient.discovery import build
     from google_auth_oauthlib.flow import InstalledAppFlow
+    from google.oauth2.credentials import Credentials
     from google.auth.transport.requests import Request
     from googleapiclient.errors import HttpError
 except ModuleNotFoundError as e:
@@ -146,9 +149,10 @@ class GoogleDriveService:
         # The file token.pickle stores the user's access and refresh tokens, and is
         # created automatically when the authorization flow completes for the first
         # time.
-        if os.path.exists('token.pickle'):
-            with open('token.pickle', 'rb') as token:
-                creds = pickle.load(token)
+        if os.path.exists('token.json'):
+            #with open('token.json', 'rb') as token:
+            #    creds = pickle.load(token)
+            creds = Credentials.from_authorized_user_file('token.json')
                 
         # If there are no (valid) credentials available, let the user log in.
         if not creds or not creds.valid:
@@ -167,8 +171,9 @@ class GoogleDriveService:
                 creds = flow.run_local_server()
             
             # Save the credentials for the next run
-            with open('token.pickle', 'wb') as token:
-                pickle.dump(creds, token)
+            with open('token.json', 'w') as token:
+                token.write(creds.to_json())
+
 
         # Build service
         self._service = build('drive', 'v3', credentials=creds)
@@ -179,6 +184,7 @@ class GoogleDriveService:
                  byte_range=None,
                  chunk_size=100*1024*1024, # from Google API
                  file_object=None,
+                 max_attempts=10,
                  verbose=True):
         # Get download url
         if file_id is None:
@@ -207,10 +213,29 @@ class GoogleDriveService:
         else:
             pointer = byte_range[0]
             while pointer < byte_range[1]:
-                # Get next chunk and write to file object
+                # Get next chunk
                 end = min(pointer + chunk_size - 1, size - 1)
                 header = {'Range': 'bytes=%d-%d' % (pointer, end)}
-                resp, content = self._service._http.request(download_url, headers=header)
+                success = False
+                i = 0
+                while (i < max_attempts) and (not success):
+                    try:
+                        # Attempt to download next chunk.
+                        resp, content = self._service._http.request(download_url, headers=header)
+                        success = True
+                    except http.client.IncompleteRead as e:
+                        # Handle IncompleteRead and re-attempt if limit not exceeded.
+                        # Note: Probably better to just retry, as here, instead of 
+                        # writing partial download to file, which can be unreliable.
+                        i += 1
+                        if verbose and (i < max_attempts):
+                            print(f'Incomplete read. Retrying... ({i} of {max_attempts})')
+                
+                # Download to file object if no errors.
+                if i == max_attempts: # incomplete reads
+                    raise HTTPError(None, 'Download failed due to incomplete read.')
+                elif not success: # failed for another reason
+                    raise HTTPError(None, 'Download failed.')
                 file_object.write(content)
 
                 # Print progress update
@@ -351,7 +376,7 @@ class GoogleDriveService:
         
         # Handle outcomes
         if response['status'] in ['200', '201']:
-            print('File sucessfully uploaded.')
+            print(f'File {filename} sucessfully uploaded.')
             content = json.loads(content.decode('utf-8'))
             #print('File ID: {}'.format(content['id']))
             #print('Filename: {}'.format(content['name']))
@@ -375,19 +400,21 @@ class GoogleDriveService:
                 return request.execute()
             except HttpError as e:
                 time.sleep(timeout)
-        
-        
 
-    def _get_file_ids(self, *,
+    def _search_files(self, *,
                       filename=None, 
+                      unique=False,
                       mime_type=None,
                       exact_match=False,
                       parent=None,
                       ignore_trash=True,
+                      fields=None,
+                      warning_level='default',
                       **kwargs):
         """
-        Search for file IDs given criteria. Remember that folders are considered
-        files with the MIME type 'application/vnd.google-apps.folder'.
+        For backwards compatibility, if provided as a string, parent will default
+        to the name of the parent folder. Otherwise, a dictionary specifying
+        the name and/or ID is preferred.
 
         Useful resources:
         - https://developers.google.com/drive/api/v3/search-files
@@ -412,13 +439,19 @@ class GoogleDriveService:
 
         # Query parents
         if parent is not None:
-            # Parent must be string if either name or ID provided
-            assert isinstance(parent, str)
-            try: # convert parent name to folder ID
-                parents = self.get_folder_ids(foldername=parent, exact_match=True)
-                #parent = ','.join(parent)
-            except SyntaxError: # assume parent ID provided
-                parents = [parent]
+            # Parent must be name if only string provided
+            if isinstance(parent, str):
+                parent = {'name': parent}
+            elif not isinstance(parent, dict):
+                raise SyntaxError('Parent must be either a dict or a string.')
+            
+            # Only search for ID if not provided.
+            if 'id' not in parent.keys():
+                parents = self.get_folder_ids(foldername=parent['name'], exact_match=True)
+            elif not isinstance(parent['id'], list):
+                parents = [parent['id']]
+            else:
+                parents = parent['id']
 
             # In case of multiple folders matching parent name, 
             # create list of parent queries
@@ -442,18 +475,52 @@ class GoogleDriveService:
                 c = ''
             q += "{}trashed = false".format(c)
 
+        # Format field parameter (loosely).
+        if isinstance(fields, list):
+            fields = ','.join(fields)
+        elif (fields is not None) and (not isinstance(fields, str)):
+            raise SyntaxError('fields parameter must be str or list of str.')
+
         # Query for files
         if len(q) > 0:
-            files = self._service.files().list(q=q, **kwargs).execute()['files']
+            result = self._service.files().list(q=q, fields=fields, **kwargs).execute()
         else:
             raise SyntaxError('Empty query string.')
         
-        # Return if not empty
-        if len(files) == 0:
-            raise SyntaxError('No files matching \'%s\'.' % filename) 
-        return [f['id'] for f in files]
+        # Check for errors.
+        warnings.filterwarnings(warning_level, message='No files matching query*')
+        warnings.filterwarnings(warning_level, message='Query returned multiple files.')
+        if result.get('incompleteSearch', False):
+            warnings.warn('Incomplete search. Some files may be missing.')
+        if len(result['files']) == 0:
+            warnings.warn(f'No files matching query: \'{q}\'.', category=RuntimeWarning) 
+        elif unique and (len(result['files']) > 1):
+            warnings.warn('Query returned multiple files.', category=RuntimeWarning)
+        
+        return result
 
-
+    def search_files(self, *,
+                     filename=None, 
+                     unique=False, 
+                     mime_type=None,
+                     exact_match=False,
+                     parent=None,
+                     fields=None,
+                     warning_level='default',
+                     **kwargs):
+        """
+        Returns the results of the query.
+        """
+        # Get files that match query parameters
+        return self._search_files(filename=filename,
+                                  unique=unique,
+                                  mime_type=mime_type,
+                                  exact_match=exact_match,
+                                  parent=parent,
+                                  fields=fields,
+                                  warning_level=warning_level,
+                                  **kwargs)
+    
     def get_file_ids(self, *, 
                      filename=None, 
                      unique=False, 
@@ -461,17 +528,19 @@ class GoogleDriveService:
                      exact_match=False,
                      parent=None,
                      **kwargs):
+        """
+        Search for file IDs given criteria. Remember that folders are considered
+        files with the MIME type 'application/vnd.google-apps.folder'.
+        """
         # Get file IDs containing filename
-        file_ids = self._get_file_ids(filename=filename, 
-                                      mime_type=mime_type,
-                                      exact_match=exact_match,
-                                      parent=parent,
-                                      **kwargs)
+        result = self._search_files(filename=filename, 
+                                    unique=unique,
+                                    mime_type=mime_type,
+                                    exact_match=exact_match,
+                                    parent=parent,
+                                    **kwargs)
         
-        if (len(file_ids) > 1) and unique:
-            raise SyntaxError('Multiple files matching \'%s\'. Please specify.' % filename)
-        else:
-            return file_ids
+        return [f['id'] for f in result['files']]
 
     def _get_file_metadata(self, file_ids, fields=None):
         # Convert to list if needed
@@ -526,13 +595,40 @@ class GoogleDriveService:
             # Create list of all folder IDs containing file ID(s)
             folder_ids = []
             for file_id in file_ids:
-                parents = drive_service._service.files().get(fileId=file_id, fields='parents').execute()['parents']
+                parents = self._service.files().get(fileId=file_id, fields='parents').execute()['parents']
                 folder_ids += [p for p in parents]
 
             return folder_ids
         
         else:
             raise SyntaxError('Foldername or filename must be provided.')
+
+    def trash_files(self, *,
+                    filename=None, 
+                    file_ids=None,
+                    unique=False, 
+                    mime_type=None,
+                    exact_match=False,
+                    parent=None,
+                    **kwargs):
+        # Get file metadata from list of file IDs
+        if filename is not None:
+            file_ids = self.get_file_ids(filename=filename, 
+                                         unique=unique,
+                                         mime_type=mime_type,
+                                         exact_match=exact_match,
+                                         parent=parent,
+                                         **kwargs)
+            
+        # Convert to list if needed
+        if not isinstance(file_ids, list):
+            file_ids = [file_ids]
+        
+        # Move files to trash.
+        for file_id in file_ids:
+            self._service.files().update(fileId=file_id, body={'trashed': True}).execute()
+        
+        return True
 
 class GoogleDriveFile:
 
@@ -1313,8 +1409,9 @@ class VideoAnnotator:
 
 
 class VideoReader:
-    # Improvements:
-    # - Change max_frames to max_memory by estimating how much memory each frame will use
+    # TODO: improvements
+    # - Change max_frames to max_memory by estimating how much memory each frame will use.
+    # - Reformat metadata properties to avoid recomputing properties if already queried.
     
     def __init__(self,
                  input_filename,
