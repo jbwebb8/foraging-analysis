@@ -2,7 +2,7 @@
 ## Overview
 This repository contains analysis code for the following publication:
 
-___________
+Webb J, Steffan P, Hayden BY, Lee D, Kemere C, McGinley M (2025) Foraging animals use dynamic Bayesian updating to model meta-uncertainty in environment representations. PLoS Comput Biol 21(4): e1012989. https://doi.org/10.1371/journal.pcbi.1012989
 
 The results of the statistical and behavioral models, as well as further analysis and derivations of their underlying mathematical behavior, can be found in iPython notebooks. Python files contain much of the heavy-lifting employed in the notebooks to provide a modular approach to the code organization and to make the notebooks themselves more user-friendly and interpretable. Additionally, they have several general-purpose toolkits for analysis and file-handling that may prove useful for other Python-based projects. 
 
