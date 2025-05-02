@@ -944,7 +944,7 @@ class Plotter:
                     extents = density_bounds
                 
                 # Get density from KDE.
-                kde = ephys.KDE(kernel_type='Gaussian', bounds=density_bounds)
+                kde = ephys.KDE(kernel_type='Gaussian', bounds=extents)
                 if transform.lower() == 'log':
                     # See https://www.stata-journal.com/sjpdf.html?articlenum=gr0003,
                     # pp. 76-78
@@ -968,14 +968,13 @@ class Plotter:
                 # - Reflect x to negative direction.
                 # - Normalize such that max height is one.
                 # - Scale density value for aesthetic purposes.
-                f = lambda x: center + ((-1)**reflect_x)*(x.max()**(-relative))*density_scale*x
-                x = f(x)
-                
+                f = lambda z: ((-1)**reflect_x)*(x.max()**(-relative))*density_scale*z
+
                 # Plot based on specified coloration.
-                self.ax.plot(x, pts,
+                self.ax.plot(center+f(x), pts,
                              color=self.cmap(c_y),
                              **kwargs)
-                self.ax.fill_betweenx(pts, x1=x, x2=center,
+                self.ax.fill_betweenx(pts, x1=center+f(x), x2=center,
                                       color=self.cmap(c_y),
                                       alpha=0.3)
                 if center_metric is not None:
