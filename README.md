@@ -2,7 +2,7 @@
 ## Overview
 This repository contains analysis code for the following publication:
 
-___________
+Webb J, Steffan P, Hayden BY, Lee D, Kemere C, McGinley M (2025) Foraging animals use dynamic Bayesian updating to model meta-uncertainty in environment representations. PLoS Comput Biol 21(4): e1012989. https://doi.org/10.1371/journal.pcbi.1012989
 
 The results of the statistical and behavioral models, as well as further analysis and derivations of their underlying mathematical behavior, can be found in iPython notebooks. Python files contain much of the heavy-lifting employed in the notebooks to provide a modular approach to the code organization and to make the notebooks themselves more user-friendly and interpretable. Additionally, they have several general-purpose toolkits for analysis and file-handling that may prove useful for other Python-based projects. 
 
@@ -23,6 +23,8 @@ The majority of the behavioral analyses for both the freely-moving and head-fixe
 - basic statistical analyses of behavioral metrics, such as residence time, travel time, and task-specific variables;
 - statistical models of adaptations in residence time in response to environmental perturbations, including linear mixed models and cluster bootstrap models; and
 - behavioral models of residence time in various environments, including heuristic, MVT, and Bayesian models.
+
+The behavioral data is published on Zenodo (freely-moving: [link](https://doi.org/10.5281/zenodo.15104572); head-fixed: [link 1](), [link 2]() ). **Note that the current code in `behavior_analysis.ipynb` relies on a different storage format to load the data. We are working on updating this to load from the Zenodo format.**
 
 Additionally, there are several notebooks not related to the published work. `ephys_preprocessing.ipynb` and `ephys_analysis.ipynb` format and analyze, respectively, electrophysiologic data from preliminary head-fixed foraging tasks. It may be useful for other projects that utilize the [MountainSort ecosystem](https://github.com/flatironinstitute/mountainsort). Note that these analyses depended on earlier versions of MountainSort that have now been archived; they may or may not be compatible with currently maintained versions. Regardless of the data ecosystem, `ephys_analysis.ipynb` contains a variety of general analyses, including peristimulis time histograms (PSTHs) and dimensionality reduction techniques (e.g. PCA, PPCA, FA, and GPFA), that are extendable to many neural datasets. In keeping with the structure of this repository, much of the heavy-lifting for the algorithms is offloaded to Python files, particularly `ephys.py`. The notebooks `patch_foraging_lt.ipynb` and `patch_foraging_simulation.ipynb` were related to earlier versions of the foraging task and are no longer pertinent.
 
